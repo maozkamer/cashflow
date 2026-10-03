@@ -189,7 +189,12 @@ function parseDate(v) {
 const num = v => typeof v === 'number' ? v : (parseFloat(String(v ?? '').replace(/[,₪\s]/g, '')) || 0);
 const clean = s => String(s ?? '').replace(/\d{6,}/g, '').replace(/\s+/g, ' ').trim();
 
+function isOwnTransfer(desc) {
+  const h = S.settings.holder;
+  return !!(h && h.length >= 2 && /העברה|הע\.|ביט/.test(desc) && h.filter(w => desc.includes(w)).length >= 2);
+}
 function classifyBank(desc, amount) {
+  if (isOwnTransfer(desc)) return INTERNAL;
   for (const [re, cat, onlyPos] of BANK_RULES) {
     if (!re.test(desc)) continue;
     if (onlyPos && amount <= 0) continue;
@@ -206,6 +211,16 @@ function applyRule(t) {
 function parseWorkbook(buf) {
   const wb = XLSX.read(buf, { type: 'array' });
   const out = { txns: [], kinds: new Set() };
+  for (const name of wb.SheetNames) {
+    const top = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, raw: true, defval: null }).slice(0, 8);
+    for (const r of top) {
+      const c = String(r[0] ?? '');
+      if (c.includes('חשבון') && c.includes('|') && !wb.Sheets[name]['!card']) {
+        const tokens = c.split('|').pop().trim().split(/\s+/).filter(w => w.length > 1 && !/^\d+$/.test(w));
+        if (tokens.length >= 2) { S.settings.holder = tokens; out.holder = true; }
+      }
+    }
+  }
   for (const name of wb.SheetNames) {
     const rows = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, raw: true, defval: null });
     const hi = rows.findIndex(r => r.some(c => String(c ?? '').trim() === 'תאריך עסקה') || r.some(c => String(c ?? '').includes('תיאור התנועה')) || r.some(c => String(c ?? '').trim() === 'חודש חיוב'));
@@ -261,8 +276,61 @@ async function importFiles(files) {
       results.push({ name: f.name, kind, added, dup, summary: p.kinds.has('summary') && !p.txns.length });
     } catch (e) { results.push({ name: f.name, kind: null, added: 0, dup: 0, err: true }); }
   }
+  if (S.settings.holder) for (const t of S.txns)
+    if (t.src === 'bank' && (t.cat === 'הכנסה אחרת' || t.cat === 'העברות') && !S.rules[norm(t.desc)] && isOwnTransfer(t.desc)) t.cat = INTERNAL;
   S.lastImport = todayISO(); save();
   return results;
+}
+
+/* ---------- insights ---------- */
+const FIXED_CATS = ['דיור', 'ביטוח', 'החזר הלוואות', 'מיסים ועירייה', 'בריאות', 'תרומות'];
+function insightsData(d, m) {
+  const cur = d.byMonth[m], others = fullMonths(d).filter(x => x !== m);
+  const avg = k => others.length ? others.reduce((a, x) => a + d.byMonth[x][k], 0) / others.length : null;
+  const avgExp = avg('exp'), avgInc = avg('inc');
+  const cats = Object.entries(cur.cats).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
+  const top = d.items.filter(t => ym(t.date) === m && t.kind === 'exp' && t.amount < 0).sort((a, b) => a.amount - b.amount).slice(0, 5);
+  const tips = [], good = [];
+  for (const r of review(d, m)) {
+    const fixed = FIXED_CATS.includes(r.c) || r.c === 'העברות';
+    tips.push({ icon: CATS[r.c], title: `${label(r.c)} גבוה מהרגיל`, save: fixed ? 0 : r.diff,
+      text: fixed ? `₪${nf.format(r.diff)} מעל הממוצע שלך. בדוק אם זו הוצאה חד-פעמית (למשל העברה גדולה) ולא הרגל.` : `₪${nf.format(r.diff)} מעל הממוצע החודשי שלך. חזרה לרמה הרגילה חוסכת ${money(r.diff)} בחודש.` });
+  }
+  const rec = recurring(d);
+  for (const r of rec.filter(r => r.last > r.first * 1.05 && r.last - r.first >= 5).slice(0, 3))
+    tips.push({ icon: '▲', title: `${r.name.slice(0, 26)} התייקר`, save: r.last - r.first,
+      text: `מ-${money(r.first)} ל-${money(r.last)} לחודש (${money((r.last - r.first) * 12)} בשנה). שווה לבקש הנחה או להשוות.` });
+  const subs = rec.filter(r => !FIXED_CATS.includes(r.cat) && r.cat !== 'דיור' && r.monthly <= 400);
+  if (subs.length >= 3) { const mo = subs.reduce((a, r) => a + r.monthly, 0);
+    tips.push({ icon: '🔁', title: `${subs.length} מנויים וחיובים קבועים`, save: 0, text: `${money(mo)} בחודש, ${money(mo * 12)} בשנה. עבור עליהם בלשונית כלים וצא מהמנויים שלא בשימוש.` }); }
+  if ((cur.cats['מזומן'] || 0) > 300) tips.push({ icon: '💵', title: 'משיכות מזומן', save: 0, text: `${money(cur.cats['מזומן'])} במזומן החודש. כסף שלא מתועד קשה להבין לאן הלך. אפשר להוסיף הוצאות מזומן עם כפתור +.` });
+  const H = health(d);
+  if (H && H.cost > 100) tips.push({ icon: '🏦', title: 'ריבית ועמלות', save: 0, text: `שילמת ${money(H.cost)} ב-12 החודשים האחרונים. בדוק פטור מעמלות והקטנת מסגרת אוברדרפט.` });
+  const unc = d.items.filter(t => ym(t.date) === m && t.cat === 'אחר' && t.kind === 'exp');
+  if (unc.length) tips.push({ icon: '🏷️', title: `${unc.length} תנועות ללא קטגוריה`, save: 0, text: `${money(unc.reduce((a, t) => a - t.amount, 0))} שלא מסווגים. סיווג משפר את הדיוק של כל התובנות.` });
+  if (cur.cats[CARD_CAT] > 0) tips.push({ icon: '💳', title: 'אשראי ללא פירוט', save: 0, text: `${money(cur.cats[CARD_CAT])} מכרטיס שאין לו קובץ עסקאות. ייבא את הקובץ המפורט כדי לראות לאן הלך הכסף.` });
+  if (H && avgInc != null && H.rate != null && H.rate < 0.1) {
+    const need = 0.1 * avgInc - (avgInc - avgExp);
+    if (need > 0) tips.push({ icon: '🎯', title: 'פער לחיסכון של 10%', save: 0, text: `כדי לחסוך 10% מההכנסה צריך להקטין הוצאות או להגדיל הכנסה ב-${money(need)} בחודש.` });
+  }
+  if (others.length >= 2) for (const c of Object.keys(CATS)) {
+    if (c === CARD_CAT || INCOME_CATS.includes(c) || c === INTERNAL) continue;
+    const a = others.reduce((x, o) => x + (d.byMonth[o].cats[c] || 0), 0) / others.length, v = cur.cats[c] || 0;
+    if (a - v > 150 && a - v > a * 0.15) good.push({ c, diff: a - v });
+  }
+  good.sort((a, b) => b.diff - a.diff);
+  tips.sort((a, b) => b.save - a.save);
+  const savable = tips.reduce((a, t) => a + t.save, 0);
+  return { cur, avgExp, avgInc, cats, top, tips, good: good.slice(0, 3), savable };
+}
+function aiSummary(d, m) {
+  const I = insightsData(d, m), c = I.cur;
+  return `סיכום פיננסי של ${mLabel(m)} (בשקלים). הנתונים הם סיכומים בלבד, בלי פרטים אישיים.
+הכנסות: ${Math.round(c.inc)}. הוצאות: ${Math.round(c.exp)}. נשאר: ${Math.round(c.inc - c.exp)}.
+${I.avgExp != null ? `ממוצע חודשי שלי: הכנסות ${Math.round(I.avgInc)}, הוצאות ${Math.round(I.avgExp)}.\n` : ''}הוצאות לפי קטגוריה:
+${I.cats.map(([k, v]) => `- ${label(k)}: ${Math.round(v)}`).join('\n')}
+חיובים קבועים: ${recurring(d).slice(0, 8).map(r => `${r.name.slice(0, 20)} ${Math.round(r.monthly)}/חודש`).join('; ')}
+תפקד כיועץ פיננסי אישי: הסבר מה קרה החודש, איפה אפשר לשפר, ושאל שאלות הבהרה. אל תמליץ על מוצרי השקעה ספציפיים. חשב בקוד ואל תנחש מספרים.`;
 }
 
 /* ---------- views ---------- */
@@ -272,7 +340,12 @@ let filter = { q: '', kind: 'all' };
 function render() {
   document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
   $('#fab').style.display = (tab === 'home' || tab === 'txns') ? '' : 'none';
-  $('#view').innerHTML = ({ home: viewHome, txns: viewTxns, import: viewImport, tools: viewTools })[tab]();
+  $('#view').innerHTML = ({ home: viewHome, insights: viewInsights, txns: viewTxns, import: viewImport, tools: viewTools })[tab]();
+  if (tab === 'insights' && $('#copyAI')) $('#copyAI').onclick = async () => {
+    const txt = aiSummary(derived(), curMonth());
+    try { await navigator.clipboard.writeText(txt); toast('הסיכום הועתק'); }
+    catch (e) { openSheet(`<h3>העתק ידנית</h3><textarea style="width:100%;height:240px" readonly>${esc(txt)}</textarea>`); }
+  };
   if (tab === 'tools') bindTools();
   if (tab === 'txns') bindTxns();
 }
@@ -351,6 +424,33 @@ function viewHome() {
       <div class="b e" style="height:${d.byMonth[x].exp / tmax * 100}%"></div></div>
       <div class="m">${mShort(x)}</div></div>`).join('')}</div>
     <div class="legend"><span><i style="background:var(--pos)"></i>הכנסות</span><span><i style="background:var(--neg)"></i>הוצאות</span></div></div>`;
+}
+
+function viewInsights() {
+  const d = derived(), m = curMonth();
+  if (!m) return `<h1>תובנות</h1>${emptyState()}`;
+  const idx = d.months.indexOf(m), I = insightsData(d, m), c = I.cur, free = c.inc - c.exp;
+  const partial = !fullMonths(d).includes(m);
+  const diff = I.avgExp != null && I.avgExp > 0 ? Math.round((c.exp - I.avgExp) / I.avgExp * 100) : null;
+  return `<div class="months">
+    <button data-m="-1" ${idx <= 0 ? 'disabled' : ''} aria-label="חודש קודם">›</button><div class="title">${mLabel(m)}</div>
+    <button data-m="1" ${idx >= d.months.length - 1 ? 'disabled' : ''} aria-label="חודש הבא">‹</button></div>
+  ${partial ? '<div class="note">זה חודש חלקי (בקצה הטווח), אז התובנות פחות מדויקות.</div>' : ''}
+  <h2>מה קרה החודש</h2>
+  <div class="card story">
+    <p>נכנסו <b class="pos">${money(c.inc)}</b> ויצאו <b class="neg">${money(c.exp)}</b>, כלומר ${free >= 0 ? 'נשארו' : 'חרגת ב-'}<b class="${free >= 0 ? 'pos' : 'neg'}">${money(Math.abs(free))}</b>.</p>
+    ${diff != null ? `<p>ההוצאה ${diff >= 0 ? 'גבוהה' : 'נמוכה'} ב-<b>${Math.abs(diff)}%</b> מהממוצע החודשי שלך (${money(I.avgExp)}).</p>` : ''}
+    ${I.cats.length ? `<p>הקטגוריות הגדולות: ${I.cats.slice(0, 3).map(([k, v]) => `${CATS[k] || ''} ${esc(label(k))} (${money(v)}, ${Math.round(v / c.exp * 100)}%)`).join(' · ')}.</p>` : ''}
+  </div>
+  ${I.top.length ? `<h2>ההוצאות הגדולות</h2><div class="list">${I.top.map(t => txRow({ ...t })).join('')}</div>` : ''}
+  <h2>איפה אפשר להשתפר</h2>
+  ${I.savable > 0 ? `<div class="card hero" style="padding:14px"><div class="label">פוטנציאל חיסכון בחודש</div><div class="big pos" style="font-size:30px">${money(I.savable)}</div><div class="muted">אם תחזור לרמה הרגילה בחריגות ותטפל בהתייקרויות</div></div>` : ''}
+  ${I.tips.length ? I.tips.map(t => `<div class="card tip"><div class="row"><div class="emoji" style="font-size:24px">${t.icon}</div><div class="grow"><b>${esc(t.title)}</b>${t.save ? ` <span class="pos">· ${money(t.save)}</span>` : ''}<div class="muted">${t.text}</div></div></div></div>`).join('') : '<div class="card"><div class="muted">אין חריגות מיוחדות החודש. כל הכבוד.</div></div>'}
+  ${I.good.length ? `<h2>מה הלך טוב</h2><div class="card">${I.good.map(g => `<div class="bar-row" style="grid-template-columns:28px 1fr auto"><div class="emoji">${CATS[g.c] || '📦'}</div><div>${esc(label(g.c))} נמוך מהרגיל</div><div><b class="pos">-${money(g.diff)}</b></div></div>`).join('')}</div>` : ''}
+  <h2>רוצה לשאול AI?</h2>
+  <div class="card"><div class="muted">מעתיק סיכום של החודש בלי שמות, תעודות זהות או מספרי חשבון. הדבק אותו בצ'אט עם Claude או ChatGPT כדי לשאול שאלות.</div>
+    <p><button class="btn ghost block" id="copyAI">📋 העתקת סיכום ל-AI</button></p></div>
+  <p class="muted" style="text-align:center">תוכן לימודי בלבד. אינו ייעוץ השקעות, מס או פנסיה.</p>`;
 }
 
 function txRow(t) {
