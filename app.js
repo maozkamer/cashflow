@@ -5,6 +5,7 @@ const KEY = 'cashflow.v1';
 const MONTHS = ['ינואר','פברואר','מרץ','אפריל','מאי','יוני','יולי','אוגוסט','ספטמבר','אוקטובר','נובמבר','דצמבר'];
 const CARD_CAT = 'כרטיס אשראי';          // חיוב אשראי בעו"ש
 const INTERNAL = 'פנימי';
+const SAV = 'חיסכון והשקעות';
 const INCOME_CATS = ['משכורת', 'קצבאות והחזרים', 'הכנסה אחרת'];
 
 const CATS = {
@@ -13,7 +14,7 @@ const CATS = {
   'מיסים ועירייה': '🏛️', 'ריבית ועמלות': '🏦', 'החזר הלוואות': '💳', 'מזומן': '💵',
   'העברות': '🔁', 'תרומות': '🤲', 'אחר': '📦',
   'משכורת': '💼', 'קצבאות והחזרים': '🧾', 'הכנסה אחרת': '💰',
-  [CARD_CAT]: '💳', [INTERNAL]: '↔️',
+  [SAV]: '📈', [CARD_CAT]: '💳', [INTERNAL]: '↔️',
 };
 const LABEL = { [CARD_CAT]: 'אשראי (ללא פירוט)', [INTERNAL]: 'העברה פנימית' };
 const label = c => LABEL[c] || c;
@@ -30,11 +31,16 @@ const CARD_MAP = {
 
 const DONATE = /עמותת|עמותה|תרומה|תרומות|ע"ר\)|תמיכה וסיוע/;
 
+const INVEST = /ביטס אוף גולד|בלינק|blink|אינטראקטיב|interactive|אקסלנס|מיטב|איביאי|\bIBI\b|אלטשולר|פסגות/i;
+
 // כללים לתנועות בנק (לפי סדר)
 const BANK_RULES = [
   [/משכורת/, 'משכורת', 1],
   [/ביטוח לאומי|בטוח לאומי|מס.?הכנסה/, 'קצבאות והחזרים', 1],
-  [/הקמת הלוואה|פיקדון|פקדון|הפקדה|רווח.*מפיק|מס על רווח|מס במקור|חיוב מס/, INTERNAL],
+  [/הקמת הלוואה/, INTERNAL],
+  [/רווח.*(מפיק|הפק)|מס על רווח|מס במקור|חיוב מס/, INTERNAL],
+  [/פיקדון|פקדון|הפקדה/, SAV],
+  [INVEST, SAV],
   [/פירעון הלוואה|החזר הלוואה/, 'החזר הלוואות'],
   [/ריבית|עמלה|חיוב זמני|יתרת זכות|ביטול תשלום|ביטול קבלת/, 'ריבית ועמלות'],
   [/שכר דירה/, 'דיור'],
@@ -93,14 +99,16 @@ function derived() {
       return from && t.date >= from ? 'int' : 'exp';
     }
     if (t.cat === INTERNAL) return 'int';
+    if (t.cat === SAV) return 'sav';
     return INCOME_CATS.includes(t.cat) ? 'inc' : 'exp';
   };
   const byMonth = {};
   const items = S.txns.map(t => ({ ...t, kind: kind(t) }));
   for (const t of items) {
-    const m = (byMonth[ym(t.date)] ??= { inc: 0, exp: 0, cats: {}, n: 0 });
+    const m = (byMonth[ym(t.date)] ??= { inc: 0, exp: 0, sav: 0, cats: {}, n: 0 });
     m.n++;
-    if (t.kind === 'inc') m.inc += t.amount;
+    if (t.kind === 'sav') m.sav -= t.amount;
+    else if (t.kind === 'inc') m.inc += t.amount;
     else if (t.kind === 'exp') { m.exp -= t.amount; m.cats[t.cat] = (m.cats[t.cat] || 0) - t.amount; }
   }
   const months = Object.keys(byMonth).sort();
@@ -111,7 +119,11 @@ let selMonth = null;
 function curMonth() {
   const d = derived();
   if (!d.months.length) return null;
-  if (!selMonth || !d.byMonth[selMonth]) selMonth = d.months[d.months.length - 1];
+  if (!selMonth || !d.byMonth[selMonth]) {
+    selMonth = d.months[d.months.length - 1];
+    const last = S.txns.reduce((a, t) => t.date > a ? t.date : a, '');
+    if (d.months.length > 1 && +last.slice(8) < 20) selMonth = d.months[d.months.length - 2];
+  }
   return selMonth;
 }
 function fullMonths(d) { return d.months.length > 2 ? d.months.slice(1, -1) : d.months; }
@@ -119,7 +131,7 @@ function fullMonths(d) { return d.months.length > 2 ? d.months.slice(1, -1) : d.
 function position(d) {
   let best = null;
   for (const t of S.txns) if (t.src === 'bank' && t.bal != null && (!best || t.date > best.date)) best = t;
-  const netDep = -S.txns.filter(t => t.cat === INTERNAL && /פיקדון|פקדון/.test(t.desc)).reduce((a, t) => a + t.amount, 0);
+  const netDep = -S.txns.filter(t => t.cat === SAV && /פיקדון|פקדון/.test(t.desc)).reduce((a, t) => a + t.amount, 0);
   return { curBal: best ? best.bal : null, netDep };
 }
 function health(d) {
@@ -203,6 +215,13 @@ function classifyBank(desc, amount) {
   }
   return amount > 0 ? 'הכנסה אחרת' : 'אחר';
 }
+function reclassify() {
+  for (const t of S.txns) {
+    if (t.manual) continue;
+    if (t.src === 'bank') t.cat = S.rules[norm(t.desc)] || classifyBank(t.desc, t.amount);
+    else if (t.src === 'card' && INVEST.test(t.desc) && !S.rules[norm(t.desc)]) t.cat = SAV;
+  }
+}
 function applyRule(t) {
   const r = S.rules[norm(t.desc)];
   return r || t.cat;
@@ -239,7 +258,7 @@ function parseWorkbook(buf) {
         const amount = -r[c.amt];
         const base = ['card', date, amount, desc, card].join('|');
         const n = seen[base] = (seen[base] || 0) + 1;
-        const cat = DONATE.test(desc) ? 'תרומות' : CARD_MAP[String(r[c.cat] ?? '').trim()] || 'אחר';
+        const cat = INVEST.test(desc) ? SAV : DONATE.test(desc) ? 'תרומות' : CARD_MAP[String(r[c.cat] ?? '').trim()] || 'אחר';
         out.txns.push({ id: hash(base) + '#' + n, date, desc, amount, src: 'card', card, cat });
       }
     } else if (head.some(h => h.includes('תיאור התנועה'))) {
@@ -276,8 +295,7 @@ async function importFiles(files) {
       results.push({ name: f.name, kind, added, dup, summary: p.kinds.has('summary') && !p.txns.length });
     } catch (e) { results.push({ name: f.name, kind: null, added: 0, dup: 0, err: true }); }
   }
-  if (S.settings.holder) for (const t of S.txns)
-    if (t.src === 'bank' && (t.cat === 'הכנסה אחרת' || t.cat === 'העברות') && !S.rules[norm(t.desc)] && isOwnTransfer(t.desc)) t.cat = INTERNAL;
+  reclassify();
   S.lastImport = todayISO(); save();
   return results;
 }
@@ -364,6 +382,10 @@ function reminderBanner() {
   return '';
 }
 
+function lastDay(m) {
+  const x = S.txns.filter(t => ym(t.date) === m).reduce((a, t) => t.date > a ? t.date : a, '');
+  return x ? +x.slice(8) + '.' + +x.slice(5, 7) : '';
+}
 function viewHome() {
   const d = derived(), m = curMonth();
   if (!m) return `<h1>תזרים מזומנים</h1>${emptyState()}`;
@@ -395,13 +417,14 @@ function viewHome() {
   <div class="card hero">
     <div class="label">${free >= 0 ? 'נשאר לך החודש' : 'חרגת החודש'}</div>
     <div class="big ${free >= 0 ? 'pos' : 'neg'}">${money(free)}</div>
-    ${partial ? '<div class="muted">חודש חלקי – חסרים נתונים בקצה הטווח</div>' : ''}
+    ${partial ? `<div class="muted">חודש חלקי${idx === d.months.length - 1 ? ' – הנתונים עד ' + lastDay(m) + '. משכורת שמגיעה בסוף החודש עוד לא נספרה' : ' – חסרים נתונים בקצה הטווח'}</div>` : ''}
   </div>
   <div class="grid2">
     <div class="card stat"><div class="muted">הכנסות</div><div class="num pos">${money(cur.inc)}</div></div>
     <div class="card stat"><div class="muted">הוצאות</div><div class="num neg">${money(cur.exp)}</div>
       ${avgExp != null ? `<div class="muted">ממוצע חודשי: ${money(avgExp)}</div>` : ''}</div>
   </div>
+  ${cur.sav ? `<div class="card" style="padding:12px 16px"><div class="row"><div class="emoji" style="font-size:24px">📈</div><div class="grow"><b>${cur.sav > 0 ? 'הועבר לחיסכון והשקעות' : 'נמשך מחיסכון והשקעות'}: ${money(Math.abs(cur.sav))}</b><div class="muted">זה לא נחשב הוצאה ולא הכנסה.</div></div></div></div>` : ''}
   ${lump ? `<div class="note">💡 "אשראי ללא פירוט"${lumpCards.length ? ' (כרטיס ' + lumpCards.join(', ') + ')' : ''} מופיע כסכום אחד כי אין לו קובץ פירוט עסקאות. אפשר להוריד מהאתר קובץ עסקאות מפורט של הכרטיס ולייבא אותו.</div>` : ''}
   ${other.length ? `<div class="note">🏷️ ${other.length} תנועות (${money(otherSum)}) ללא קטגוריה. <button class="chip" data-other="1">לתיקון</button></div>` : ''}
   <h2>לאן הלך הכסף <span class="muted">· לחץ להגדרת תקציב</span></h2>
@@ -439,6 +462,7 @@ function viewInsights() {
   <h2>מה קרה החודש</h2>
   <div class="card story">
     <p>נכנסו <b class="pos">${money(c.inc)}</b> ויצאו <b class="neg">${money(c.exp)}</b>, כלומר ${free >= 0 ? 'נשארו' : 'חרגת ב-'}<b class="${free >= 0 ? 'pos' : 'neg'}">${money(Math.abs(free))}</b>.</p>
+    ${c.sav ? `<p>${c.sav > 0 ? 'הפקדת' : 'משכת'} <b>${money(Math.abs(c.sav))}</b> ${c.sav > 0 ? 'לחיסכון והשקעות' : 'מחיסכון והשקעות'}.</p>` : ''}
     ${diff != null ? `<p>ההוצאה ${diff >= 0 ? 'גבוהה' : 'נמוכה'} ב-<b>${Math.abs(diff)}%</b> מהממוצע החודשי שלך (${money(I.avgExp)}).</p>` : ''}
     ${I.cats.length ? `<p>הקטגוריות הגדולות: ${I.cats.slice(0, 3).map(([k, v]) => `${CATS[k] || ''} ${esc(label(k))} (${money(v)}, ${Math.round(v / c.exp * 100)}%)`).join(' · ')}.</p>` : ''}
   </div>
@@ -458,7 +482,7 @@ function txRow(t) {
   const name = t.src === 'manual' ? '✍️ ' + t.desc : t.desc;
   return `<button class="tx ${t.kind === 'int' ? 'int' : ''}" data-id="${esc(t.id)}">
     <div class="emoji">${CATS[t.cat] || '📦'}</div>
-    <div class="grow"><div class="name">${esc(name)}</div><div class="sub">${esc(label(t.cat))}${t.kind === 'int' ? ' · לא נספר' : ''}</div></div>
+    <div class="grow"><div class="name">${esc(name)}</div><div class="sub">${esc(label(t.cat))}${t.kind === 'int' ? ' · לא נספר' : t.kind === 'sav' ? ' · לא הוצאה' : ''}</div></div>
     <div class="amt ${t.amount > 0 ? 'pos' : ''}">${sign}${money(t.amount)}</div></button>`;
 }
 
@@ -640,7 +664,7 @@ function editTx(id) {
   $('#ok').onclick = () => {
     const all = $('#all')?.checked;
     const key = norm(t.desc);
-    for (const x of S.txns) if (x.id === id || (all && key && norm(x.desc) === key)) x.cat = pick;
+    for (const x of S.txns) if (x.id === id || (all && key && norm(x.desc) === key)) { x.cat = pick; x.manual = true; }
     if (all && key) S.rules[key] = pick;
     save(); closeSheet(); render(); toast('נשמר');
   };
@@ -714,6 +738,7 @@ document.addEventListener('click', async e => {
   else if (el.classList.contains('sheet-bg')) closeSheet();
 });
 
+if (S.v !== 3) { reclassify(); S.v = 3; save(); }
 if ('serviceWorker' in navigator && location.protocol.startsWith('http'))
   navigator.serviceWorker.register('sw.js').catch(() => {});
 render();
