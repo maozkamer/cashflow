@@ -50,10 +50,11 @@ let storageOk = true;
 function load() {
   try {
     const s = JSON.parse(localStorage.getItem(KEY));
-    if (s && s.txns) return Object.assign({ rules: {}, checks: {}, settings: { rate: 3 }, lastImport: null }, s);
+    if (s && s.txns) return Object.assign(blank(), s);
   } catch (e) {}
-  return { txns: [], rules: {}, checks: {}, settings: { rate: 3 }, lastImport: null };
+  return blank();
 }
+function blank() { return { txns: [], rules: {}, checks: {}, budgets: {}, settings: { rate: 3 }, lastImport: null }; }
 function save() {
   try { localStorage.setItem(KEY, JSON.stringify(S)); storageOk = true; }
   catch (e) { storageOk = false; toast('לא ניתן לשמור במכשיר – עשה גיבוי'); }
@@ -114,6 +115,41 @@ function curMonth() {
   return selMonth;
 }
 function fullMonths(d) { return d.months.length > 2 ? d.months.slice(1, -1) : d.months; }
+
+function position(d) {
+  let best = null;
+  for (const t of S.txns) if (t.src === 'bank' && t.bal != null && (!best || t.date > best.date)) best = t;
+  const netDep = -S.txns.filter(t => t.cat === INTERNAL && /פיקדון|פקדון/.test(t.desc)).reduce((a, t) => a + t.amount, 0);
+  return { curBal: best ? best.bal : null, netDep };
+}
+function health(d) {
+  const fm = fullMonths(d); if (!fm.length) return null;
+  const inc = fm.reduce((a, m) => a + d.byMonth[m].inc, 0), exp = fm.reduce((a, m) => a + d.byMonth[m].exp, 0);
+  const avgExp = exp / fm.length;
+  const { curBal, netDep } = position(d);
+  const liquid = curBal == null ? null : curBal + Math.max(0, netDep);
+  const [y, mo] = d.months[d.months.length - 1].split('-').map(Number);
+  const from = new Date(Date.UTC(y, mo - 12, 1)).toISOString().slice(0, 7);
+  const cost = d.items.filter(t => t.cat === 'ריבית ועמלות' && t.kind === 'exp' && ym(t.date) >= from).reduce((a, t) => a - t.amount, 0);
+  return { cost: Math.max(0, cost), rate: inc > 0 ? (inc - exp) / inc : null, avgExp, runway: liquid != null && avgExp > 0 ? liquid / avgExp : null, liquid };
+}
+function review(d, m) {
+  const fm = fullMonths(d);
+  const others = fm.filter(x => x !== m);
+  if (!fm.includes(m) || others.length < 2) return [];
+  const cur = d.byMonth[m].cats, out = [];
+  for (const c of Object.keys(cur)) {
+    if (c === CARD_CAT) continue;
+    const avg = others.reduce((a, x) => a + (d.byMonth[x].cats[c] || 0), 0) / others.length;
+    const diff = cur[c] - avg;
+    if (diff > 150 && diff > avg * 0.15) out.push({ c, diff, pct: avg > 0 ? Math.round(diff / avg * 100) : null });
+  }
+  return out.sort((a, b) => b.diff - a.diff).slice(0, 4);
+}
+function catAvg(d, c) {
+  const fm = fullMonths(d); if (!fm.length) return 0;
+  return fm.reduce((a, m) => a + (d.byMonth[m].cats[c] || 0), 0) / fm.length;
+}
 
 function recurring(d) {
   const g = {};
@@ -268,6 +304,13 @@ function viewHome() {
   const tmax = Math.max(1, ...last6.map(x => Math.max(d.byMonth[x].inc, d.byMonth[x].exp)));
   const partial = idx === 0 || idx === d.months.length - 1;
   const lump = cur.cats[CARD_CAT] > 0;
+  const H = health(d), rev = review(d, m);
+  const other = d.items.filter(t => ym(t.date) === m && t.cat === 'אחר' && t.kind === 'exp');
+  const otherSum = other.reduce((a, t) => a - t.amount, 0);
+  const dot = c => `<i class="dot ${c}"></i>`;
+  const rateC = H && H.rate != null ? (H.rate >= 0.2 ? 'g' : H.rate >= 0.1 ? 'y' : 'r') : '';
+  const runC = H && H.runway != null ? (H.runway >= 3 ? 'g' : H.runway >= 1 ? 'y' : 'r') : '';
+  const costC = H ? (H.cost < 300 ? 'g' : H.cost < 1000 ? 'y' : 'r') : '';
   const lumpCards = [...new Set(d.items.filter(t => ym(t.date) === m && t.cat === CARD_CAT && t.kind === 'exp').map(t => (t.desc.match(/\b(\d{4})\b/) || [])[1]).filter(Boolean))];
 
   return `${reminderBanner()}
@@ -287,11 +330,20 @@ function viewHome() {
       ${avgExp != null ? `<div class="muted">ממוצע חודשי: ${money(avgExp)}</div>` : ''}</div>
   </div>
   ${lump ? `<div class="note">💡 "אשראי ללא פירוט"${lumpCards.length ? ' (כרטיס ' + lumpCards.join(', ') + ')' : ''} מופיע כסכום אחד כי אין לו קובץ פירוט עסקאות. אפשר להוריד מהאתר קובץ עסקאות מפורט של הכרטיס ולייבא אותו.</div>` : ''}
-  <h2>לאן הלך הכסף</h2>
-  <div class="card">${cats.length ? cats.map(([c, v]) => `
-    <div class="bar-row"><div class="emoji">${CATS[c] || '📦'}</div>
-      <div><div>${esc(label(c))}</div><div class="track"><div class="fill" style="width:${Math.max(3, v / max * 100)}%"></div></div></div>
-      <div><b>${money(v)}</b></div></div>`).join('') : '<div class="muted">אין הוצאות בחודש הזה</div>'}</div>
+  ${other.length ? `<div class="note">🏷️ ${other.length} תנועות (${money(otherSum)}) ללא קטגוריה. <button class="chip" data-other="1">לתיקון</button></div>` : ''}
+  <h2>לאן הלך הכסף <span class="muted">· לחץ להגדרת תקציב</span></h2>
+  <div class="card">${cats.length ? cats.map(([c, v]) => { const b = S.budgets[c], over = b && v > b; return `
+    <div class="bar-row" data-bud="${esc(c)}"><div class="emoji">${CATS[c] || '📦'}</div>
+      <div><div>${esc(label(c))}${b ? ` <span class="muted">מתוך ${money(b)}</span>` : ''}</div><div class="track"><div class="fill ${over ? 'over' : ''}" style="width:${Math.min(100, Math.max(3, v / (b ? Math.max(b, v) : max) * 100))}%"></div></div></div>
+      <div><b class="${over ? 'neg' : ''}">${money(v)}</b></div></div>`; }).join('') : '<div class="muted">אין הוצאות בחודש הזה</div>'}</div>
+  ${rev.length ? `<h2>סקירה חודשית</h2><div class="card"><div class="muted">קטגוריות שחרגו מהממוצע שלך:</div>
+    ${rev.map(r => `<div class="bar-row" style="grid-template-columns:28px 1fr auto"><div class="emoji">${CATS[r.c] || '📦'}</div><div>${esc(label(r.c))}</div><div><b class="neg">+${money(r.diff)}</b>${r.pct != null && r.pct <= 500 ? ` <span class="muted">(${r.pct}%+)</span>` : ''}</div></div>`).join('')}
+    <div class="muted" style="margin-top:6px">שאל את עצמך: האם זה חד-פעמי או הרגל שנוצר?</div></div>` : ''}
+  ${H ? `<h2>מצב פיננסי</h2><div class="card health">
+    ${H.rate != null ? `<div class="hrow">${dot(rateC)}<div class="grow"><b>שיעור חיסכון: ${Math.round(H.rate * 100)}%</b><div class="muted">${H.rate >= 0.2 ? 'מצוין – 20% ומעלה.' : H.rate >= 0.1 ? 'סביר. היעד המקובל הוא 20%.' : H.rate >= 0 ? 'נמוך. כדאי לחפש דליפות בכלים.' : 'ההוצאות גבוהות מההכנסות בממוצע.'}</div></div></div>` : ''}
+    ${H.runway != null ? `<div class="hrow">${dot(runC)}<div class="grow"><b>כרית ביטחון: ${H.runway.toFixed(1)} חודשי הוצאה</b><div class="muted">${money(H.liquid)} בעו"ש הזה. חיסכון וחשבונות אחרים לא נספרים. מקובל 3–6 חודשים.</div></div></div>` : ''}
+    <div class="hrow">${dot(costC)}<div class="grow"><b>ריבית ועמלות ב-12 חודשים: ${money(H.cost)}</b><div class="muted">${H.cost < 300 ? 'נמוך, יופי.' : 'אפשר להוריד: הקטן מסגרת אוברדרפט ובדוק פטור מעמלות.'}</div></div></div>
+  </div>` : ''}
   <h2>6 חודשים אחרונים</h2>
   <div class="card"><div class="trend">${last6.map(x => `
     <div class="col ${x === m ? 'sel' : ''}" data-pick="${x}"><div class="pair">
@@ -317,6 +369,7 @@ function viewTxns() {
   let list = d.items.filter(t => ym(t.date) === m);
   if (filter.kind === 'exp') list = list.filter(t => t.kind === 'exp');
   if (filter.kind === 'inc') list = list.filter(t => t.kind === 'inc');
+  if (filter.kind === 'other') list = list.filter(t => t.cat === 'אחר');
   if (filter.q) list = list.filter(t => (t.desc + label(t.cat)).toLowerCase().includes(filter.q.toLowerCase()));
   list.sort((a, b) => b.date.localeCompare(a.date) || String(b.id).localeCompare(String(a.id)));
   let html = '', day = '';
@@ -329,7 +382,7 @@ function viewTxns() {
     <button data-m="-1" ${idx <= 0 ? 'disabled' : ''} aria-label="חודש קודם">›</button><div class="title">${mLabel(m)}</div>
     <button data-m="1" ${idx >= d.months.length - 1 ? 'disabled' : ''} aria-label="חודש הבא">‹</button></div>
   <input class="search" id="q" type="search" placeholder="חיפוש בית עסק..." value="${esc(filter.q)}">
-  <div class="chips">${[['all', 'הכל'], ['exp', 'הוצאות'], ['inc', 'הכנסות']].map(([k, l]) => `<button class="chip ${filter.kind === k ? 'on' : ''}" data-kind="${k}">${l}</button>`).join('')}</div>
+  <div class="chips">${[['all', 'הכל'], ['exp', 'הוצאות'], ['inc', 'הכנסות'], ['other', 'ללא קטגוריה']].map(([k, l]) => `<button class="chip ${filter.kind === k ? 'on' : ''}" data-kind="${k}">${l}</button>`).join('')}</div>
   ${html || '<div class="empty">אין תנועות</div>'}`;
 }
 function bindTxns() {
@@ -373,8 +426,8 @@ function viewTools() {
   const recTotal = rec.reduce((s, r) => s + r.yearly, 0);
   const fm = fullMonths(d);
   const avgExp = fm.length ? fm.reduce((s, x) => s + d.byMonth[x].exp, 0) / fm.length : 0;
-  const bank = S.txns.filter(t => t.src === 'bank' && t.bal != null).sort((a, b) => a.date.localeCompare(b.date));
-  const curBal = bank.length ? bank[bank.length - 1].bal : null;
+  const bank = S.txns.filter(t => t.src === 'bank' && t.bal != null);
+  const curBal = position(d).curBal;
   const minBal = bank.length ? Math.min(...bank.map(t => t.bal)) : null;
   const buffer = avgExp;
   const idle = curBal != null ? Math.max(0, curBal - buffer) : 0;
@@ -392,7 +445,14 @@ function viewTools() {
     ${rec.length ? `<p class="muted">נמצאו ${rec.length} חיובים קבועים, בסך <b>${money(recTotal)}</b> בשנה.</p>
     <table class="t">${rec.slice(0, 15).map(r => `<tr><td>${CATS[r.cat] || ''} ${esc(r.name.slice(0, 22))}${r.last > r.first * 1.05 ? ' <span title="עלה במחיר" class="neg">▲</span>' : ''}</td>
       <td class="n">${money(r.monthly)}/חו'</td><td class="n"><b>${money(r.yearly)}</b></td></tr>`).join('')}</table>
-    <p class="muted">▲ = המחיר עלה מאז החיוב הראשון. בדוק מה אפשר לבטל או להוזיל.</p>` : '<p class="muted">עוד אין מספיק נתונים – צריך לפחות 3 חודשים.</p>'}
+    <p class="muted">▲ = המחיר עלה מאז החיוב הראשון. בדוק מה אפשר לבטל או להוזיל.</p>
+    ${avgExp > 0 ? `<p class="muted">חיובים קבועים הם בערך ${Math.round(recTotal / 12 / avgExp * 100)}% מההוצאה החודשית שלך – זה החלק הקשה לשינוי, אז שווה לבדוק אותו פעם בשנה.</p>` : ''}` : '<p class="muted">עוד אין מספיק נתונים – צריך לפחות 3 חודשים.</p>'}
+  </div></details>
+
+  <details><summary>📅 סיכום חודשי</summary><div class="inner">
+    ${d.months.length ? `<table class="t"><tr><th></th><th class="n">הכנסות</th><th class="n">הוצאות</th><th class="n">נשאר</th></tr>
+    ${[...d.months].reverse().map(x => { const b = d.byMonth[x], f = b.inc - b.exp; return `<tr><td>${mShort(x)} ${x.slice(2, 4)}${fullMonths(d).includes(x) ? '' : '*'}</td><td class="n">${money(b.inc)}</td><td class="n">${money(b.exp)}</td><td class="n ${f >= 0 ? 'pos' : 'neg'}"><b>${money(f)}</b></td></tr>`; }).join('')}</table>
+    <p class="muted">* חודש חלקי – חסרים נתונים בקצה הטווח.</p>` : '<p class="muted">אין נתונים.</p>'}
   </div></details>
 
   <details><summary>💰 כסף שיושב בחשבון בלי לעבוד</summary><div class="inner">
@@ -452,11 +512,11 @@ function bindTools() {
     try {
       const j = JSON.parse(await e.target.files[0].text());
       if (!j.txns) throw 0;
-      S = Object.assign({ rules: {}, checks: {}, settings: { rate: 3 }, lastImport: null }, j); save(); render(); toast('הנתונים שוחזרו');
+      S = Object.assign(blank(), j); save(); render(); toast('הנתונים שוחזרו');
     } catch (err) { toast('קובץ הגיבוי לא תקין'); }
   };
   $('#wipe').onclick = () => {
-    if (confirm('למחוק את כל הנתונים מהמכשיר? אי אפשר לבטל.')) { S = { txns: [], rules: {}, checks: {}, settings: { rate: 3 }, lastImport: null }; save(); selMonth = null; render(); toast('הכל נמחק'); }
+    if (confirm('למחוק את כל הנתונים מהמכשיר? אי אפשר לבטל.')) { S = blank(); save(); selMonth = null; render(); toast('הכל נמחק'); }
   };
 }
 
@@ -484,6 +544,16 @@ function editTx(id) {
     save(); closeSheet(); render(); toast('נשמר');
   };
   const del = $('#del'); if (del) del.onclick = () => { S.txns = S.txns.filter(x => x.id !== id); save(); closeSheet(); render(); };
+}
+
+function setBudget(c) {
+  const d = derived(), sug = Math.round(catAvg(d, c) / 50) * 50;
+  openSheet(`<h3>${CATS[c] || ''} תקציב חודשי – ${esc(label(c))}</h3>
+    <div class="muted">${sug ? 'הממוצע החודשי שלך בקטגוריה: ' + money(catAvg(d, c)) : ''}</div>
+    <input class="bigin" id="bv" type="number" inputmode="numeric" placeholder="₪" value="${S.budgets[c] || sug || ''}">
+    <div class="row" style="margin-top:12px"><button class="btn grow" id="ok">שמירה</button>${S.budgets[c] ? '<button class="btn ghost" id="rm">הסרה</button>' : ''}</div>`);
+  $('#ok').onclick = () => { const v = parseFloat($('#bv').value); if (v > 0) S.budgets[c] = v; else delete S.budgets[c]; save(); closeSheet(); render(); };
+  const rm = $('#rm'); if (rm) rm.onclick = () => { delete S.budgets[c]; save(); closeSheet(); render(); };
 }
 
 function addTx() {
@@ -516,7 +586,7 @@ function addTx() {
 
 /* ---------- events ---------- */
 document.addEventListener('click', async e => {
-  const el = e.target.closest('[data-tab],[data-go],[data-m],[data-pick],[data-kind],[data-id],#pick,#fab,.sheet-bg');
+  const el = e.target.closest('[data-tab],[data-go],[data-m],[data-pick],[data-kind],[data-id],[data-bud],[data-other],#pick,#fab,.sheet-bg');
   if (!el) return;
   if (el.dataset.tab) { tab = el.dataset.tab; render(); scrollTo(0, 0); }
   else if (el.dataset.go) { tab = el.dataset.go; render(); scrollTo(0, 0); }
@@ -524,6 +594,8 @@ document.addEventListener('click', async e => {
   else if (el.dataset.pick) { selMonth = el.dataset.pick; render(); }
   else if (el.dataset.kind) { filter.kind = el.dataset.kind; render(); }
   else if (el.dataset.id) editTx(el.dataset.id);
+  else if (el.dataset.bud) setBudget(el.dataset.bud);
+  else if (el.dataset.other) { filter.kind = 'other'; tab = 'txns'; render(); scrollTo(0, 0); }
   else if (el.id === 'pick') { const f = $('#file'); f.onchange = async () => {
       const files = [...f.files]; if (!files.length) return;
       $('#importResult').innerHTML = '<div class="note">קורא קבצים…</div>';

@@ -133,3 +133,11 @@ table.t td.n { text-align: end; direction: ltr; white-space: nowrap; }
   background: #14201b; color: #fff; padding: 10px 18px; border-radius: 999px; font-size: 14px; max-width: 90vw; }
 .empty { text-align: center; padding: 40px 10px; color: var(--muted); }
 .empty .icon { font-size: 54px; }
+
+.bar-row[data-bud] { cursor: pointer; }
+.bar-row .fill.over { background: var(--neg); }
+.health .hrow { display: flex; gap: 12px; align-items: flex-start; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.health .hrow:last-child { border-bottom: 0; }
+.dot { width: 12px; height: 12px; border-radius: 50%; margin-top: 6px; flex: none; background: var(--muted); }
+.dot.g { background: var(--pos); } .dot.y { background: #e0a526; } .dot.r { background: var(--neg); }
+table.t th { color: var(--muted); font-weight: 500; font-size: 12px; }
