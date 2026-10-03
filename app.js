@@ -400,7 +400,7 @@ function viewImport() {
     <div class="icon">📥</div>
     <p><b>בחר את קבצי האקסל מהבנק ומהאשראי</b><br><span class="muted">אפשר לבחור כמה קבצים יחד. האפליקציה מזהה לבד מה כל קובץ.</span></p>
     <button class="btn" id="pick">בחירת קבצים</button>
-    <input type="file" id="file" accept=".xlsx,.xls" multiple hidden>
+    <input type="file" id="file" accept=".xlsx,.xls,.csv" multiple hidden>
     <div class="muted" style="margin-top:10px">${last}</div>
   </div>
   <div id="importResult"></div>
@@ -409,6 +409,7 @@ function viewImport() {
     <ol class="steps">
       <li><b>עו"ש:</b> באתר/אפליקציית דיסקונט ← עובר ושב ← ייצוא לאקסל.</li>
       <li><b>אשראי:</b> כרטיסי אשראי ← פירוט עסקאות ← ייצוא לאקסל.</li>
+      <li><b>מהדרייב:</b> לחץ "בחירת קבצים" ובחלון שנפתח בחר Drive (באייפון: <b>עיון</b> ← Google Drive, אחרי שהפעלת אותו ב"מיקומים" באפליקציית קבצים). אפשר לבחור כמה קבצים יחד.</li>
       <li>אפשר להעלות גם קבצים שחופפים לתקופה שכבר ייבאת – כפילויות מסוננות לבד.</li>
     </ol>
   </div>
