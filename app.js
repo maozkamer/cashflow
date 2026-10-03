@@ -180,7 +180,8 @@ function recurring(d) {
     if (stable < 0.7) continue;
     const sorted = [...arr].sort((a, b) => a.date.localeCompare(b.date));
     const perMonth = arr.reduce((s, t) => s - t.amount, 0) / months.length;
-    out.push({ name: arr[0].desc, cat: arr[0].cat, months: months.length, monthly: perMonth, yearly: perMonth * 12,
+    const bm = {}; for (const t of arr) bm[ym(t.date)] = (bm[ym(t.date)] || 0) - t.amount;
+    out.push({ bm, name: arr[0].desc, cat: arr[0].cat, months: months.length, monthly: perMonth, yearly: perMonth * 12,
       first: -sorted[0].amount, last: -sorted[sorted.length - 1].amount });
   }
   return out.sort((a, b) => b.yearly - a.yearly);
@@ -341,14 +342,92 @@ function insightsData(d, m) {
   const savable = tips.reduce((a, t) => a + t.save, 0);
   return { cur, avgExp, avgInc, cats, top, tips, good: good.slice(0, 3), savable };
 }
+function prevMonth(m) { const [y, mo] = m.split('-').map(Number); return new Date(Date.UTC(y, mo - 2, 1)).toISOString().slice(0, 7); }
+function balanceAt(m) {
+  let best = null;
+  for (const t of S.txns) if (t.src === 'bank' && t.bal != null && ym(t.date) <= m && (!best || t.date > best.date)) best = t;
+  return best ? best.bal : null;
+}
+function reviewData(d, m) {
+  const cur = d.byMonth[m], pm = prevMonth(m);
+  const others = fullMonths(d).filter(x => x !== m);
+  const avg = f => others.length ? others.reduce((a, x) => a + f(d.byMonth[x]), 0) / others.length : null;
+  const avgInc = avg(b => b.inc), avgExp = avg(b => b.exp);
+  const avgFree = avgInc != null ? avgInc - avgExp : null;
+  // 1. categories vs average
+  const names = new Set(Object.keys(cur.cats));
+  others.forEach(x => Object.keys(d.byMonth[x].cats).forEach(k => names.add(k)));
+  const catRows = [...names].map(c => {
+    const v = cur.cats[c] || 0, a = others.length ? others.reduce((x, o) => x + (d.byMonth[o].cats[c] || 0), 0) / others.length : null;
+    return { c, v, a, flag: a != null && others.length >= 2 && v > a * 1.15 && v - a >= 100 };
+  }).filter(r => r.v > 0 || (r.a || 0) > 100).sort((x, y) => y.v - x.v);
+  // 2. new recurring + price increases
+  const groups = {};
+  for (const t of d.items) {
+    if (t.kind !== 'exp' || t.amount >= 0 || [CARD_CAT, 'מזומן', 'העברות', 'החזר הלוואות'].includes(t.cat)) continue;
+    const k = norm(t.desc); if (k) (groups[k] ??= []).push(t);
+  }
+  const fresh = [];
+  if (pm > d.months[0]) for (const arr of Object.values(groups)) {
+    const ms = [...new Set(arr.map(t => ym(t.date)))].sort();
+    if (ms[0] < pm || !ms.includes(m) || !ms.includes(pm)) continue;
+    const a1 = arr.filter(t => ym(t.date) === pm).reduce((x, t) => x - t.amount, 0), a2 = arr.filter(t => ym(t.date) === m).reduce((x, t) => x - t.amount, 0);
+    if (arr[0].cat !== 'תרומות' && Math.abs(a2 - a1) <= a1 * 0.02) fresh.push({ name: arr[0].desc, amount: a2 });
+  }
+  const rises = [];
+  for (const r of recurring(d)) {
+    if (r.bm[m] == null) continue;
+    const prior = Object.entries(r.bm).filter(([k]) => k < m).map(([, v]) => v).sort((x, y) => x - y);
+    if (!prior.length) continue;
+    const med = prior[Math.floor(prior.length / 2)];
+    if (r.bm[m] > med * 1.05 && r.bm[m] - med >= 3) rises.push({ name: r.name, from: med, to: r.bm[m] });
+  }
+  // 3. savings + idle cash
+  const sv = x => d.items.filter(t => t.kind === 'sav' && ym(t.date) === x);
+  const deposits = x => sv(x).filter(t => t.amount < 0).reduce((a, t) => a - t.amount, 0);
+  const dep = deposits(m), pastDep = others.map(deposits);
+  const habit = pastDep.filter(v => v > 0).length >= 3;
+  const avgDep = pastDep.length ? pastDep.reduce((a, v) => a + v, 0) / pastDep.length : null;
+  const bal = balanceAt(m), buffer = avgExp, idle = bal != null && buffer != null ? Math.max(0, bal - buffer) : null;
+  // 4. debt
+  const loans = d.items.filter(t => t.cat === 'החזר הלוואות' && t.kind === 'exp');
+  const paidM = loans.filter(t => ym(t.date) === m).reduce((a, t) => a - t.amount, 0);
+  const paidAll = loans.reduce((a, t) => a - t.amount, 0);
+  const taken = d.items.filter(t => /הקמת הלוואה/.test(t.desc) && t.amount > 0).reduce((a, t) => a + t.amount, 0);
+  const feesM = d.items.filter(t => t.cat === 'ריבית ועמלות' && t.kind === 'exp' && ym(t.date) === m).reduce((a, t) => a - t.amount, 0);
+  // 5. actions (₪ per month)
+  const acts = [];
+  for (const r of catRows.filter(r => r.flag && !FIXED_CATS.includes(r.c) && r.c !== 'העברות' && r.c !== CARD_CAT))
+    acts.push({ icon: CATS[r.c], impact: r.v - r.a, title: `החזר את ${label(r.c)} לרמה הרגילה`, text: `החודש ${money(r.v)} לעומת ממוצע ${money(r.a)}.` });
+  for (const r of rises) acts.push({ icon: '▲', impact: r.to - r.from, title: `בקש הנחה על ${r.name.slice(0, 24)}`, text: `התייקר מ-${money(r.from)} ל-${money(r.to)} לחודש.` });
+  if (feesM > 0) acts.push({ icon: '🏦', impact: feesM, title: 'הפחת ריבית ועמלות בנק', text: `שילמת ${money(feesM)} החודש. בקש פטור מעמלות והקטנת מסגרת.` });
+  if (idle > 1000) acts.push({ icon: '💰', impact: idle * S.settings.rate / 1200, title: `הזז ${money(idle)} מהעו"ש לפיקדון או קרן כספית`, text: `כסף שיושב מעל הבאפר. בריבית ${S.settings.rate}% זה כ-${money(idle * S.settings.rate / 100)} בשנה.` });
+  acts.sort((a, b) => b.impact - a.impact);
+  const out3 = acts.slice(0, 3);
+  if (out3.length < 3 && avgInc > 0 && (!habit || dep === 0))
+    out3.push({ icon: '🎯', impact: avgInc * 0.05, title: 'הוראת קבע לחיסכון ביום משכורת', text: `הפרשה של 5% מההכנסה הממוצעת (${money(avgInc * 0.05)} בחודש) לפני שמספיקים להוציא.` });
+  return { cur, others, avgInc, avgExp, avgFree, catRows, fresh, rises, dep, avgDep, habit, bal, buffer, idle, paidM, paidAll, taken, feesM, actions: out3.slice(0, 3) };
+}
+
 function aiSummary(d, m) {
-  const I = insightsData(d, m), c = I.cur;
-  return `סיכום פיננסי של ${mLabel(m)} (בשקלים). הנתונים הם סיכומים בלבד, בלי פרטים אישיים.
-הכנסות: ${Math.round(c.inc)}. הוצאות: ${Math.round(c.exp)}. נשאר: ${Math.round(c.inc - c.exp)}.
-${I.avgExp != null ? `ממוצע חודשי שלי: הכנסות ${Math.round(I.avgInc)}, הוצאות ${Math.round(I.avgExp)}.\n` : ''}הוצאות לפי קטגוריה:
-${I.cats.map(([k, v]) => `- ${label(k)}: ${Math.round(v)}`).join('\n')}
+  const R = reviewData(d, m), c = R.cur, f = v => v == null ? 'לא ידוע' : Math.round(v);
+  return `אני מעלה סיכום חודשי של הכסף שלי (בשקלים, בלי פרטים אישיים). ענה בעברית.
+השווה את החודש לפרופיל הבסיס שלי (ממוצע חודשי):
+1. הכנסות, הוצאות לפי קטגוריה ויתרה פנויה מול הממוצע שלי. סמן כל סעיף שחרג ביותר מ-15%.
+2. חיובים קבועים חדשים או התייקרויות.
+3. האם בוצעה העברה לחיסכון? כמה כסף יושב בעו"ש מעל הבאפר?
+4. התקדמות בפירעון חובות ובחיסכון.
+5. שלוש פעולות לחודש הזה, מדורגות לפי השפעה ב-₪.
+אל תמליץ על מוצרי השקעה ספציפיים. חשב בקוד ואל תנחש מספרים, ושאל אותי אם חסר מידע.
+
+נתוני ${mLabel(m)}:
+הכנסות ${f(c.inc)} (ממוצע ${f(R.avgInc)}). הוצאות ${f(c.exp)} (ממוצע ${f(R.avgExp)}). נשאר ${f(c.inc - c.exp)} (ממוצע ${f(R.avgFree)}).
+קטגוריות (החודש / ממוצע):
+${R.catRows.map(r => `- ${label(r.c)}: ${f(r.v)} / ${f(r.a)}${r.flag ? ' (חריגה)' : ''}`).join('\n')}
 חיובים קבועים: ${recurring(d).slice(0, 8).map(r => `${r.name.slice(0, 20)} ${Math.round(r.monthly)}/חודש`).join('; ')}
-תפקד כיועץ פיננסי אישי: הסבר מה קרה החודש, איפה אפשר לשפר, ושאל שאלות הבהרה. אל תמליץ על מוצרי השקעה ספציפיים. חשב בקוד ואל תנחש מספרים.`;
+חדשים: ${R.fresh.map(x => x.name.slice(0, 20) + ' ' + Math.round(x.amount)).join('; ') || 'אין'}. התייקרויות: ${R.rises.map(x => `${x.name.slice(0, 20)} ${Math.round(x.from)}→${Math.round(x.to)}`).join('; ') || 'אין'}
+הפקדה לחיסכון והשקעות החודש: ${f(R.dep)} (ממוצע ${f(R.avgDep)}). יתרה בעו"ש: ${f(R.bal)}, באפר (חודש הוצאות): ${f(R.buffer)}.
+החזרי הלוואות החודש: ${f(R.paidM)}, סה"כ בתקופה: ${f(R.paidAll)}, הלוואות שנלקחו: ${f(R.taken)}.`;
 }
 
 /* ---------- views ---------- */
@@ -451,28 +530,51 @@ function viewHome() {
 
 function viewInsights() {
   const d = derived(), m = curMonth();
-  if (!m) return `<h1>תובנות</h1>${emptyState()}`;
-  const idx = d.months.indexOf(m), I = insightsData(d, m), c = I.cur, free = c.inc - c.exp;
-  const partial = !fullMonths(d).includes(m);
-  const diff = I.avgExp != null && I.avgExp > 0 ? Math.round((c.exp - I.avgExp) / I.avgExp * 100) : null;
+  if (!m) return `<h1>סקירה חודשית</h1>${emptyState()}`;
+  const idx = d.months.indexOf(m), I = insightsData(d, m), R = reviewData(d, m), c = R.cur, free = c.inc - c.exp;
+  const partial = !fullMonths(d).includes(m), noBase = R.others.length < 2;
+  const rate = S.settings.rate;
+  const diffTxt = (v, a) => a == null ? '' : `${v >= a ? '+' : '-'}${money(Math.abs(v - a)).replace('-', '')}`;
   return `<div class="months">
     <button data-m="-1" ${idx <= 0 ? 'disabled' : ''} aria-label="חודש קודם">›</button><div class="title">${mLabel(m)}</div>
     <button data-m="1" ${idx >= d.months.length - 1 ? 'disabled' : ''} aria-label="חודש הבא">‹</button></div>
-  ${partial ? '<div class="note">זה חודש חלקי (בקצה הטווח), אז התובנות פחות מדויקות.</div>' : ''}
-  <h2>מה קרה החודש</h2>
+  ${partial ? `<div class="note">זה חודש חלקי${idx === d.months.length - 1 ? ' (הנתונים עד ' + lastDay(m) + ')' : ''}, אז ההשוואה לממוצע פחות מדויקת.</div>` : ''}
+  ${noBase ? '<div class="note">אין עדיין מספיק חודשים מלאים כדי לחשב ממוצע. ייבא נתונים של לפחות 3 חודשים.</div>' : ''}
+
+  <h2>1. הכנסות, הוצאות ויתרה פנויה מול הממוצע</h2>
   <div class="card story">
-    <p>נכנסו <b class="pos">${money(c.inc)}</b> ויצאו <b class="neg">${money(c.exp)}</b>, כלומר ${free >= 0 ? 'נשארו' : 'חרגת ב-'}<b class="${free >= 0 ? 'pos' : 'neg'}">${money(Math.abs(free))}</b>.</p>
-    ${c.sav ? `<p>${c.sav > 0 ? 'הפקדת' : 'משכת'} <b>${money(Math.abs(c.sav))}</b> ${c.sav > 0 ? 'לחיסכון והשקעות' : 'מחיסכון והשקעות'}.</p>` : ''}
-    ${diff != null ? `<p>ההוצאה ${diff >= 0 ? 'גבוהה' : 'נמוכה'} ב-<b>${Math.abs(diff)}%</b> מהממוצע החודשי שלך (${money(I.avgExp)}).</p>` : ''}
-    ${I.cats.length ? `<p>הקטגוריות הגדולות: ${I.cats.slice(0, 3).map(([k, v]) => `${CATS[k] || ''} ${esc(label(k))} (${money(v)}, ${Math.round(v / c.exp * 100)}%)`).join(' · ')}.</p>` : ''}
+    <p>נכנסו <b class="pos">${money(c.inc)}</b>${R.avgInc != null ? ` <span class="muted">(ממוצע ${money(R.avgInc)})</span>` : ''}, יצאו <b class="neg">${money(c.exp)}</b>${R.avgExp != null ? ` <span class="muted">(ממוצע ${money(R.avgExp)})</span>` : ''}.</p>
+    <p>${free >= 0 ? 'נשאר' : 'חרגת ב-'} <b class="${free >= 0 ? 'pos' : 'neg'}">${money(Math.abs(free))}</b>${R.avgFree != null ? ` <span class="muted">(ממוצע ${money(R.avgFree)})</span>` : ''}.</p>
   </div>
-  ${I.top.length ? `<h2>ההוצאות הגדולות</h2><div class="list">${I.top.map(t => txRow({ ...t })).join('')}</div>` : ''}
-  <h2>איפה אפשר להשתפר</h2>
-  ${I.savable > 0 ? `<div class="card hero" style="padding:14px"><div class="label">פוטנציאל חיסכון בחודש</div><div class="big pos" style="font-size:30px">${money(I.savable)}</div><div class="muted">אם תחזור לרמה הרגילה בחריגות ותטפל בהתייקרויות</div></div>` : ''}
-  ${I.tips.length ? I.tips.map(t => `<div class="card tip"><div class="row"><div class="emoji" style="font-size:24px">${t.icon}</div><div class="grow"><b>${esc(t.title)}</b>${t.save ? ` <span class="pos">· ${money(t.save)}</span>` : ''}<div class="muted">${t.text}</div></div></div></div>`).join('') : '<div class="card"><div class="muted">אין חריגות מיוחדות החודש. כל הכבוד.</div></div>'}
-  ${I.good.length ? `<h2>מה הלך טוב</h2><div class="card">${I.good.map(g => `<div class="bar-row" style="grid-template-columns:28px 1fr auto"><div class="emoji">${CATS[g.c] || '📦'}</div><div>${esc(label(g.c))} נמוך מהרגיל</div><div><b class="pos">-${money(g.diff)}</b></div></div>`).join('')}</div>` : ''}
+  <div class="card"><table class="t"><tr><th>קטגוריה</th><th class="n">החודש</th><th class="n">ממוצע</th><th class="n">סטייה</th></tr>
+    ${R.catRows.slice(0, 12).map(r => `<tr><td>${CATS[r.c] || ''} ${esc(label(r.c))}${r.flag ? ' ⚠️' : ''}</td><td class="n ${r.flag ? 'neg' : ''}"><b>${money(r.v)}</b></td><td class="n">${r.a == null ? '—' : money(r.a)}</td><td class="n ${r.flag ? 'neg' : 'muted'}">${diffTxt(r.v, r.a)}</td></tr>`).join('')}</table>
+    <p class="muted">⚠️ = יותר מ-15% מעל הממוצע שלך.</p></div>
+
+  <h2>2. חיובים קבועים חדשים והתייקרויות</h2>
+  <div class="card">
+    ${R.fresh.length ? `<b>נראים כחיובים חדשים שחוזרים:</b>${R.fresh.map(x => `<div class="bar-row" style="grid-template-columns:1fr auto"><div>🆕 ${esc(x.name.slice(0, 30))}</div><div><b>${money(x.amount)}</b></div></div>`).join('')}` : '<div class="muted">לא זוהו חיובים קבועים חדשים.</div>'}
+    ${R.rises.length ? `<div style="margin-top:10px"><b>התייקרויות:</b></div>${R.rises.map(x => `<div class="bar-row" style="grid-template-columns:1fr auto"><div>▲ ${esc(x.name.slice(0, 30))}</div><div><span class="muted">${money(x.from)} ←</span> <b class="neg">${money(x.to)}</b></div></div>`).join('')}` : '<div class="muted" style="margin-top:6px">אין התייקרויות בחיובים הקבועים.</div>'}
+  </div>
+
+  <h2>3. חיסכון וכסף שיושב בעו"ש</h2>
+  <div class="card">
+    <p>${R.dep > 0 ? `✅ הפקדת <b>${money(R.dep)}</b> לחיסכון והשקעות החודש${R.avgDep != null ? ` <span class="muted">(ממוצע ${money(R.avgDep)})</span>` : ''}.` : (R.habit ? '⚠️ לא זוהתה העברה לחיסכון החודש, אף על פי שבדרך כלל יש.' : '⚠️ לא זוהתה העברה לחיסכון החודש.')}</p>
+    ${R.bal != null ? `<p>יתרה בעו"ש בסוף החודש: <b>${money(R.bal)}</b>. באפר מומלץ (חודש הוצאות): ${money(R.buffer)}.<br>${R.idle > 0 ? `כסף שיושב מעל הבאפר: <b class="pos">${money(R.idle)}</b>, כ-${money(R.idle * rate / 100)} בשנה בריבית ${rate}%.` : 'אין כסף עודף מעל הבאפר.'}</p>` : ''}
+  </div>
+
+  <h2>4. התקדמות בחובות ובחיסכון</h2>
+  <div class="card">
+    <p>החזרי הלוואות החודש: <b>${money(R.paidM)}</b>. סה"כ ששולם בתקופה: ${money(R.paidAll)}.${R.taken ? ` הלוואות שנלקחו: ${money(R.taken)} – נשאר בערך ${money(Math.max(0, R.taken - R.paidAll))} <span class="muted">(בלי ריבית)</span>.` : ''}</p>
+    ${R.feesM > 0 ? `<p>ריבית ועמלות בנק החודש: <b class="neg">${money(R.feesM)}</b>.</p>` : ''}
+    ${c.sav ? `<p>${c.sav > 0 ? 'חיסכון והשקעות נטו החודש' : 'נמשך מהחיסכון נטו החודש'}: <b class="${c.sav > 0 ? 'pos' : 'neg'}">${money(Math.abs(c.sav))}</b>.</p>` : ''}
+  </div>
+
+  <h2>5. שלוש פעולות לחודש הזה</h2>
+  ${R.actions.length ? R.actions.map((t, i) => `<div class="card tip"><div class="row"><div class="emoji" style="font-size:24px">${t.icon}</div><div class="grow"><b>${i + 1}. ${esc(t.title)}</b> <span class="pos">· כ-${money(t.impact)} בחודש</span><div class="muted">${t.text}</div></div></div></div>`).join('') : '<div class="card"><div class="muted">אין פעולות דחופות החודש. המשך כך.</div></div>'}
+  ${I.good.length ? `<div class="card"><b>מה הלך טוב:</b>${I.good.map(g => `<div class="bar-row" style="grid-template-columns:28px 1fr auto"><div class="emoji">${CATS[g.c] || '📦'}</div><div>${esc(label(g.c))} נמוך מהרגיל</div><div><b class="pos">-${money(g.diff)}</b></div></div>`).join('')}</div>` : ''}
+
   <h2>רוצה לשאול AI?</h2>
-  <div class="card"><div class="muted">מעתיק סיכום של החודש בלי שמות, תעודות זהות או מספרי חשבון. הדבק אותו בצ'אט עם Claude או ChatGPT כדי לשאול שאלות.</div>
+  <div class="card"><div class="muted">מעתיק את שאלות הסקירה יחד עם הנתונים של החודש (בלי שמות, ת"ז או מספרי חשבון). הדבק בצ'אט עם Claude או ChatGPT לניתוח עמוק יותר.</div>
     <p><button class="btn ghost block" id="copyAI">📋 העתקת סיכום ל-AI</button></p></div>
   <p class="muted" style="text-align:center">תוכן לימודי בלבד. אינו ייעוץ השקעות, מס או פנסיה.</p>`;
 }
