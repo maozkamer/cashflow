@@ -287,6 +287,17 @@ function parseWorkbook(buf) {
   return out;
 }
 
+function headline() {
+  const d = derived(); selMonth = null; const m = curMonth(); if (!m) return '';
+  const R = reviewData(d, m), c = R.cur, free = c.inc - c.exp, flags = R.catRows.filter(r => r.flag).slice(0, 3);
+  return `<h2>מה חדש ב${mLabel(m)}</h2><div class="card story">
+    <p>נשאר <b class="${free >= 0 ? 'pos' : 'neg'}">${money(free)}</b>${R.avgFree != null ? ` לעומת ממוצע ${money(R.avgFree)}` : ''}.</p>
+    ${flags.length ? `<p>⚠️ חריגות מהממוצע: ${flags.map(r => `${esc(label(r.c))} (+${money(r.v - r.a)})`).join(', ')}.</p>` : '<p>אין חריגות גדולות מהממוצע.</p>'}
+    ${R.rises.length ? `<p>▲ התייקרויות: ${R.rises.map(x => esc(x.name.slice(0, 18))).join(', ')}.</p>` : ''}
+    ${R.actions[0] ? `<p>💡 הפעולה המשתלמת ביותר: ${esc(R.actions[0].title)} (כ-${money(R.actions[0].impact)} בחודש).</p>` : ''}
+    <button class="btn block" data-go="insights">לסקירה המלאה</button></div>`;
+}
+
 async function importFiles(files) {
   const results = [];
   for (const f of files) {
@@ -866,7 +877,7 @@ document.addEventListener('click', async e => {
           r.err || !r.kind ? 'לא זוהה כקובץ בנק או אשראי' :
           r.summary ? `${r.kind} – זה קובץ סיכום חודשי בלי פירוט עסקאות, לכן החיובים נספרים לפי התשלום מהעו"ש.` :
           `${r.kind}: נוספו ${r.added} תנועות${r.dup ? `, ${r.dup} כבר היו קיימות` : ''}`}</div></div></div>`).join('')}
-        <p><button class="btn block" data-go="home">לצפייה בסיכום</button></p></div>`;
+        </div>${headline()}`;
       f.value = '';
     }; f.click(); }
   else if (el.id === 'fab') addTx();
