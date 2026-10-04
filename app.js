@@ -60,7 +60,7 @@ function load() {
   } catch (e) {}
   return blank();
 }
-function blank() { return { txns: [], rules: {}, checks: {}, budgets: {}, settings: { rate: 3 }, lastImport: null }; }
+function blank() { return { txns: [], rules: {}, checks: {}, budgets: {}, loan: null, settings: { rate: 3 }, lastImport: null }; }
 function save() {
   try { localStorage.setItem(KEY, JSON.stringify(S)); storageOk = true; }
   catch (e) { storageOk = false; toast('לא ניתן לשמור במכשיר – עשה גיבוי'); }
@@ -354,6 +354,14 @@ function balanceAt(m) {
   for (const t of S.txns) if (t.src === 'bank' && t.bal != null && ym(t.date) <= m && (!best || t.date > best.date)) best = t;
   return best ? best.bal : null;
 }
+function loanPlan(L) {
+  if (!L || !(L.balance > 0) || !(L.pay > 0)) return null;
+  const r = (L.rate || 0) / 1200;
+  if (r > 0 && L.pay <= L.balance * r) return { bad: true };
+  const n = r > 0 ? -Math.log(1 - L.balance * r / L.pay) / Math.log(1 + r) : L.balance / L.pay;
+  const end = new Date(); end.setMonth(end.getMonth() + Math.ceil(n));
+  return { months: Math.ceil(n), interest: Math.max(0, n * L.pay - L.balance), end: `${end.getMonth() + 1}/${end.getFullYear()}` };
+}
 function reviewData(d, m) {
   const cur = d.byMonth[m], pm = prevMonth(m);
   const others = fullMonths(d).filter(x => x !== m);
@@ -571,7 +579,8 @@ function viewInsights() {
 
   <h2>4. התקדמות בחובות ובחיסכון</h2>
   <div class="card">
-    <p>החזרי הלוואות החודש: <b>${money(R.paidM)}</b>. סה"כ ששולם בתקופה: ${money(R.paidAll)}.${R.taken ? ` הלוואות שנלקחו: ${money(R.taken)} – נשאר בערך ${money(Math.max(0, R.taken - R.paidAll))} <span class="muted">(בלי ריבית)</span>.` : ''}</p>
+    <p>החזרי הלוואות החודש: <b>${money(R.paidM)}</b>. סה"כ ששולם בתקופה: ${money(R.paidAll)}.</p>
+    ${S.loan && S.loan.balance > 0 ? (() => { const P = loanPlan(S.loan); return `<p>יתרת ההלוואה (כפי שעדכנת ב-${S.loan.updated.split('-').reverse().join('/')}): <b>${money(S.loan.balance)}</b>, החזר חודשי ${money(S.loan.pay)}.${P && !P.bad ? `<br>נשארו כ-<b>${P.months}</b> חודשים (סיום בערך ${P.end}), ריבית עד הסוף כ-${money(P.interest)}.` : P ? '<br>⚠️ ההחזר החודשי לא מכסה את הריבית.' : ''}</p>`; })() : (R.taken ? `<p>הלוואות שנלקחו: ${money(R.taken)} – נשאר בערך ${money(Math.max(0, R.taken - R.paidAll))} <span class="muted">(הערכה בלי ריבית. לדיוק, עדכן את ההלוואה בלשונית כלים)</span>.</p>` : '')}
     ${R.feesM > 0 ? `<p>ריבית ועמלות בנק החודש: <b class="neg">${money(R.feesM)}</b>.</p>` : ''}
     ${c.sav ? `<p>${c.sav > 0 ? 'חיסכון והשקעות נטו החודש' : 'נמשך מהחיסכון נטו החודש'}: <b class="${c.sav > 0 ? 'pos' : 'neg'}">${money(Math.abs(c.sav))}</b>.</p>` : ''}
   </div>
@@ -702,6 +711,15 @@ function viewTools() {
     <p class="muted">קרן חירום: 3–6 חודשי הוצאה = ${money(avgExp * 3)} – ${money(avgExp * 6)}. הבנק משלם בערך 0.1% על עו"ש. את ההעברה עושים בעצמך.</p>`}
   </div></details>
 
+  <details><summary>💳 עדכון הלוואה</summary><div class="inner">
+    <p class="muted">אופציונלי. מספיק לעדכן כשההלוואה משתנה (פירעון מוקדם, מחזור או החזר חדש). בלי עדכון האפליקציה מעריכה לפי התנועות בעו"ש.</p>
+    <div class="field"><span>יתרה לסילוק (₪)</span><input type="number" id="lb" value="${S.loan ? S.loan.balance : ''}"></div>
+    <div class="field"><span>החזר חודשי (₪)</span><input type="number" id="lp" value="${S.loan ? S.loan.pay : ''}"></div>
+    <div class="field"><span>ריבית שנתית (%)</span><input type="number" id="lr" step="0.1" value="${S.loan ? S.loan.rate : ''}"></div>
+    <div id="loanOut" class="note"></div>
+    <button class="btn ghost block" id="lclr">ניקוי עדכון</button>
+  </div></details>
+
   <details><summary>📉 כמה עולים דמי ניהול</summary><div class="inner">
     <div class="field"><span>סכום (₪)</span><input type="number" id="fa" value="100000"></div>
     <div class="field"><span>תשואה שנתית (%)</span><input type="number" id="fr" value="7" step="0.5"></div>
@@ -732,6 +750,14 @@ function bindTools() {
     $('#feeOut').innerHTML = `אחרי ${v('fy')} שנים:<br>עם ${v('f1')}% → <b>${money(a)}</b><br>עם ${v('f2')}% → <b>${money(b)}</b><br>ההפרש: <b class="pos">${money(b - a)}</b>`;
   };
   ['fa', 'fr', 'fy', 'f1', 'f2'].forEach(id => $('#' + id).addEventListener('input', calc)); calc();
+  const lc = () => {
+    const v = id => parseFloat($('#' + id).value) || 0;
+    S.loan = v('lb') > 0 ? { balance: v('lb'), pay: v('lp'), rate: v('lr'), updated: todayISO() } : null; save();
+    const P = loanPlan(S.loan);
+    $('#loanOut').innerHTML = !S.loan ? 'אין עדכון שמור.' : !P ? 'הזן גם החזר חודשי.' : P.bad ? '⚠️ ההחזר החודשי לא מכסה את הריבית.' : `נשארו כ-<b>${P.months}</b> חודשים (עד ${P.end}). ריבית עד הסוף: <b>${money(P.interest)}</b>.`;
+  };
+  ['lb', 'lp', 'lr'].forEach(id => $('#' + id).addEventListener('change', lc)); lc();
+  $('#lclr').onclick = () => { S.loan = null; save(); ['lb', 'lp', 'lr'].forEach(id => $('#' + id).value = ''); lc(); };
   const r = $('#rate'); if (r) r.addEventListener('change', () => { S.settings.rate = parseFloat(r.value) || 0; save(); const o = document.querySelectorAll('details'); const open = [...o].map(x => x.open); render(); document.querySelectorAll('details').forEach((x, i) => x.open = open[i]); });
   document.querySelectorAll('[data-ck]').forEach(c => c.addEventListener('change', () => {
     S.checks[c.dataset.ck] = c.checked; save(); c.closest('.check').classList.toggle('done', c.checked);
