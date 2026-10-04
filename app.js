@@ -83,6 +83,12 @@ function norm(desc) {
 }
 
 /* ---------- derived data ---------- */
+function incLabel(t) {
+  if (/הקמת הלוואה/.test(t.desc)) return 'הלוואה שנלקחה';
+  if (t.cat === INTERNAL) return 'העברות מחשבון אחר שלך';
+  if (t.cat === SAV) return 'משיכה מחיסכון והשקעות';
+  return label(t.cat);
+}
 let cache = null;
 function derived() {
   if (cache) return cache;
@@ -98,17 +104,17 @@ function derived() {
       const from = m ? cardFrom[m[1]] : anyFrom;
       return from && t.date >= from ? 'int' : 'exp';
     }
-    if (t.cat === INTERNAL) return 'int';
-    if (t.cat === SAV) return 'sav';
+    if (t.cat === INTERNAL) return t.amount > 0 && t.src === 'bank' ? 'inc' : 'int';
+    if (t.cat === SAV) return t.amount > 0 && t.src === 'bank' ? 'inc' : 'sav';
     return INCOME_CATS.includes(t.cat) ? 'inc' : 'exp';
   };
   const byMonth = {};
   const items = S.txns.map(t => ({ ...t, kind: kind(t) }));
   for (const t of items) {
-    const m = (byMonth[ym(t.date)] ??= { inc: 0, exp: 0, sav: 0, cats: {}, n: 0 });
+    const m = (byMonth[ym(t.date)] ??= { inc: 0, exp: 0, sav: 0, cats: {}, src: {}, n: 0 });
     m.n++;
-    if (t.kind === 'sav') m.sav -= t.amount;
-    else if (t.kind === 'inc') m.inc += t.amount;
+    if (t.cat === SAV) m.sav -= t.amount;
+    if (t.kind === 'inc') { m.inc += t.amount; const l = incLabel(t); m.src[l] = (m.src[l] || 0) + t.amount; }
     else if (t.kind === 'exp') { m.exp -= t.amount; m.cats[t.cat] = (m.cats[t.cat] || 0) - t.amount; }
   }
   const months = Object.keys(byMonth).sort();
@@ -503,6 +509,7 @@ function viewHome() {
     <div class="card stat"><div class="muted">הוצאות</div><div class="num neg">${money(cur.exp)}</div>
       ${avgExp != null ? `<div class="muted">ממוצע חודשי: ${money(avgExp)}</div>` : ''}</div>
   </div>
+  ${Object.keys(cur.src).length > 1 ? `<div class="card" style="padding:12px 16px"><b>מאיפה נכנס הכסף</b>${Object.entries(cur.src).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<div class="bar-row" style="grid-template-columns:1fr auto;padding:4px 0"><div>${esc(k)}</div><div><b class="pos">${money(v)}</b></div></div>`).join('')}</div>` : ''}
   ${cur.sav ? `<div class="card" style="padding:12px 16px"><div class="row"><div class="emoji" style="font-size:24px">📈</div><div class="grow"><b>${cur.sav > 0 ? 'הועבר לחיסכון והשקעות' : 'נמשך מחיסכון והשקעות'}: ${money(Math.abs(cur.sav))}</b><div class="muted">זה לא נחשב הוצאה ולא הכנסה.</div></div></div></div>` : ''}
   ${lump ? `<div class="note">💡 "אשראי ללא פירוט"${lumpCards.length ? ' (כרטיס ' + lumpCards.join(', ') + ')' : ''} מופיע כסכום אחד כי אין לו קובץ פירוט עסקאות. אפשר להוריד מהאתר קובץ עסקאות מפורט של הכרטיס ולייבא אותו.</div>` : ''}
   ${other.length ? `<div class="note">🏷️ ${other.length} תנועות (${money(otherSum)}) ללא קטגוריה. <button class="chip" data-other="1">לתיקון</button></div>` : ''}
