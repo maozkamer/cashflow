@@ -2,7 +2,7 @@
 /* תזרים מזומנים - כל הנתונים נשמרים רק במכשיר (localStorage). */
 
 const KEY = 'cashflow.v1';
-const VERSION = '2026-10-05-d';
+const VERSION = '2026-10-05-e';
 const MONTHS = ['ינואר','פברואר','מרץ','אפריל','מאי','יוני','יולי','אוגוסט','ספטמבר','אוקטובר','נובמבר','דצמבר'];
 const CARD_CAT = 'כרטיס אשראי';          // חיוב אשראי בעו"ש
 const INTERNAL = 'פנימי';
@@ -74,6 +74,19 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 const nf = new Intl.NumberFormat('he-IL', { maximumFractionDigits: 0 });
 const money = n => (n < 0 ? '-' : '') + '₪' + nf.format(Math.abs(Math.round(n)));
 const ym = d => d.slice(0, 7);
+const startDay = () => Math.min(28, Math.max(1, S.settings.startDay || 1));
+function per(date) {                       // the financial period a date belongs to
+  const sd = startDay();
+  if (sd === 1) return date.slice(0, 7);
+  const d = new Date(date + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() - (sd - 1));
+  return d.toISOString().slice(0, 7);
+}
+function perStart(m) { const [y, mo] = m.split('-').map(Number); return new Date(Date.UTC(y, mo - 1, startDay())).toISOString().slice(0, 10); }
+function perEnd(m) { const [y, mo] = m.split('-').map(Number); return new Date(Date.UTC(y, mo, startDay() - 1)).toISOString().slice(0, 10); }
+const dm = iso => +iso.slice(8) + '.' + +iso.slice(5, 7);
+const perRange = m => startDay() === 1 ? '' : `מ-${dm(perStart(m))} עד ${dm(perEnd(m))}`;
+const lastData = () => { const t0 = todayISO(); return S.txns.reduce((a, t) => t.date > a && t.date <= t0 ? t.date : a, ''); };
 const mLabel = m => MONTHS[+m.slice(5) - 1] + ' ' + m.slice(0, 4);
 const mShort = m => MONTHS[+m.slice(5) - 1].slice(0, 3);
 const todayISO = () => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
@@ -112,7 +125,7 @@ function derived() {
   const byMonth = {};
   const items = S.txns.map(t => ({ ...t, kind: kind(t) }));
   for (const t of items) {
-    const m = (byMonth[ym(t.date)] ??= { inc: 0, exp: 0, sav: 0, cats: {}, src: {}, n: 0 });
+    const m = (byMonth[per(t.date)] ??= { inc: 0, exp: 0, sav: 0, cats: {}, src: {}, n: 0 });
     m.n++;
     if (t.cat === SAV) m.sav -= t.amount;
     if (t.kind === 'inc') { m.inc += t.amount; const l = incLabel(t); m.src[l] = (m.src[l] || 0) + t.amount; }
@@ -127,13 +140,13 @@ function curMonth() {
   const d = derived();
   if (!d.months.length) return null;
   if (!selMonth || !d.byMonth[selMonth]) {
-    selMonth = d.months[d.months.length - 1];
-    const last = S.txns.reduce((a, t) => t.date > a ? t.date : a, '');
-    if (d.months.length > 1 && +last.slice(8) < 20) selMonth = d.months[d.months.length - 2];
+    const last = lastData();
+    const done = d.months.filter(m => perEnd(m) <= last);
+    selMonth = done.length ? done[done.length - 1] : d.months[d.months.length - 1];
   }
   return selMonth;
 }
-function fullMonths(d) { return d.months.length > 2 ? d.months.slice(1, -1) : d.months; }
+function fullMonths(d) { const last = lastData(); const c = d.months.filter(m => perEnd(m) <= last); return c.length > 1 ? c.slice(1) : c; }
 
 function position(d) {
   let best = null;
@@ -149,7 +162,7 @@ function health(d) {
   const liquid = curBal == null ? null : curBal + Math.max(0, netDep);
   const [y, mo] = d.months[d.months.length - 1].split('-').map(Number);
   const from = new Date(Date.UTC(y, mo - 12, 1)).toISOString().slice(0, 7);
-  const cost = d.items.filter(t => t.cat === 'ריבית ועמלות' && t.kind === 'exp' && ym(t.date) >= from).reduce((a, t) => a - t.amount, 0);
+  const cost = d.items.filter(t => t.cat === 'ריבית ועמלות' && t.kind === 'exp' && per(t.date) >= from).reduce((a, t) => a - t.amount, 0);
   return { cost: Math.max(0, cost), rate: inc > 0 ? (inc - exp) / inc : null, avgExp, runway: liquid != null && avgExp > 0 ? liquid / avgExp : null, liquid };
 }
 function review(d, m) {
@@ -179,7 +192,7 @@ function recurring(d) {
   }
   const out = [];
   for (const [k, arr] of Object.entries(g)) {
-    const months = [...new Set(arr.map(t => ym(t.date)))];
+    const months = [...new Set(arr.map(t => per(t.date)))];
     if (months.length < 3) continue;
     const amts = arr.map(t => -t.amount).sort((a, b) => a - b);
     const med = amts[Math.floor(amts.length / 2)];
@@ -187,7 +200,7 @@ function recurring(d) {
     if (stable < 0.7) continue;
     const sorted = [...arr].sort((a, b) => a.date.localeCompare(b.date));
     const perMonth = arr.reduce((s, t) => s - t.amount, 0) / months.length;
-    const bm = {}; for (const t of arr) bm[ym(t.date)] = (bm[ym(t.date)] || 0) - t.amount;
+    const bm = {}; for (const t of arr) bm[per(t.date)] = (bm[per(t.date)] || 0) - t.amount;
     out.push({ bm, name: arr[0].desc, cat: arr[0].cat, months: months.length, monthly: perMonth, yearly: perMonth * 12,
       first: -sorted[0].amount, last: -sorted[sorted.length - 1].amount });
   }
@@ -347,7 +360,7 @@ function insightsData(d, m) {
   const avg = k => others.length ? others.reduce((a, x) => a + d.byMonth[x][k], 0) / others.length : null;
   const avgExp = avg('exp'), avgInc = avg('inc');
   const cats = Object.entries(cur.cats).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
-  const top = d.items.filter(t => ym(t.date) === m && t.kind === 'exp' && t.amount < 0).sort((a, b) => a.amount - b.amount).slice(0, 5);
+  const top = d.items.filter(t => per(t.date) === m && t.kind === 'exp' && t.amount < 0).sort((a, b) => a.amount - b.amount).slice(0, 5);
   const tips = [], good = [];
   for (const r of review(d, m)) {
     const fixed = FIXED_CATS.includes(r.c) || r.c === 'העברות';
@@ -364,7 +377,7 @@ function insightsData(d, m) {
   if ((cur.cats['מזומן'] || 0) > 300) tips.push({ icon: '💵', title: 'משיכות מזומן', save: 0, text: `${money(cur.cats['מזומן'])} במזומן החודש. כסף שלא מתועד קשה להבין לאן הלך. אפשר להוסיף הוצאות מזומן עם כפתור +.` });
   const H = health(d);
   if (H && H.cost > 100) tips.push({ icon: '🏦', title: 'ריבית ועמלות', save: 0, text: `שילמת ${money(H.cost)} ב-12 החודשים האחרונים. בדוק פטור מעמלות והקטנת מסגרת אוברדרפט.` });
-  const unc = d.items.filter(t => ym(t.date) === m && t.cat === 'אחר' && t.kind === 'exp');
+  const unc = d.items.filter(t => per(t.date) === m && t.cat === 'אחר' && t.kind === 'exp');
   if (unc.length) tips.push({ icon: '🏷️', title: `${unc.length} תנועות ללא קטגוריה`, save: 0, text: `${money(unc.reduce((a, t) => a - t.amount, 0))} שלא מסווגים. סיווג משפר את הדיוק של כל התובנות.` });
   if (cur.cats[CARD_CAT] > 0) tips.push({ icon: '💳', title: 'אשראי ללא פירוט', save: 0, text: `${money(cur.cats[CARD_CAT])} מכרטיס שאין לו קובץ עסקאות. ייבא את הקובץ המפורט כדי לראות לאן הלך הכסף.` });
   if (H && avgInc != null && H.rate != null && H.rate < 0.1) {
@@ -384,7 +397,7 @@ function insightsData(d, m) {
 function prevMonth(m) { const [y, mo] = m.split('-').map(Number); return new Date(Date.UTC(y, mo - 2, 1)).toISOString().slice(0, 7); }
 function balanceAt(m) {
   let best = null;
-  for (const t of S.txns) if (t.src === 'bank' && t.bal != null && ym(t.date) <= m && (!best || t.date > best.date)) best = t;
+  for (const t of S.txns) if (t.src === 'bank' && t.bal != null && per(t.date) <= m && (!best || t.date > best.date)) best = t;
   return best ? best.bal : null;
 }
 function loanPlan(L) {
@@ -416,9 +429,9 @@ function reviewData(d, m) {
   }
   const fresh = [];
   if (pm > d.months[0]) for (const arr of Object.values(groups)) {
-    const ms = [...new Set(arr.map(t => ym(t.date)))].sort();
+    const ms = [...new Set(arr.map(t => per(t.date)))].sort();
     if (ms[0] < pm || !ms.includes(m) || !ms.includes(pm)) continue;
-    const a1 = arr.filter(t => ym(t.date) === pm).reduce((x, t) => x - t.amount, 0), a2 = arr.filter(t => ym(t.date) === m).reduce((x, t) => x - t.amount, 0);
+    const a1 = arr.filter(t => per(t.date) === pm).reduce((x, t) => x - t.amount, 0), a2 = arr.filter(t => per(t.date) === m).reduce((x, t) => x - t.amount, 0);
     if (arr[0].cat !== 'תרומות' && Math.abs(a2 - a1) <= a1 * 0.02) fresh.push({ name: arr[0].desc, amount: a2 });
   }
   const rises = [];
@@ -430,7 +443,7 @@ function reviewData(d, m) {
     if (r.bm[m] > med * 1.05 && r.bm[m] - med >= 3) rises.push({ name: r.name, from: med, to: r.bm[m] });
   }
   // 3. savings + idle cash
-  const sv = x => d.items.filter(t => t.kind === 'sav' && ym(t.date) === x);
+  const sv = x => d.items.filter(t => t.kind === 'sav' && per(t.date) === x);
   const deposits = x => sv(x).filter(t => t.amount < 0).reduce((a, t) => a - t.amount, 0);
   const dep = deposits(m), pastDep = others.map(deposits);
   const habit = pastDep.filter(v => v > 0).length >= 3;
@@ -438,10 +451,10 @@ function reviewData(d, m) {
   const bal = balanceAt(m), buffer = avgExp, idle = bal != null && buffer != null ? Math.max(0, bal - buffer) : null;
   // 4. debt
   const loans = d.items.filter(t => t.cat === 'החזר הלוואות' && t.kind === 'exp');
-  const paidM = loans.filter(t => ym(t.date) === m).reduce((a, t) => a - t.amount, 0);
+  const paidM = loans.filter(t => per(t.date) === m).reduce((a, t) => a - t.amount, 0);
   const paidAll = loans.reduce((a, t) => a - t.amount, 0);
   const taken = d.items.filter(t => /הקמת הלוואה/.test(t.desc) && t.amount > 0).reduce((a, t) => a + t.amount, 0);
-  const feesM = d.items.filter(t => t.cat === 'ריבית ועמלות' && t.kind === 'exp' && ym(t.date) === m).reduce((a, t) => a - t.amount, 0);
+  const feesM = d.items.filter(t => t.cat === 'ריבית ועמלות' && t.kind === 'exp' && per(t.date) === m).reduce((a, t) => a - t.amount, 0);
   // 5. actions (₪ per month)
   const acts = [];
   for (const r of catRows.filter(r => r.flag && !FIXED_CATS.includes(r.c) && r.c !== 'העברות' && r.c !== CARD_CAT))
@@ -501,15 +514,14 @@ function emptyState() {
 }
 
 function reminderBanner() {
-  const t = new Date(), day = t.getDate();
-  const nineth = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-09`;
-  if (day >= 9 && (!S.lastImport || S.lastImport < nineth) && S.txns.length)
+  const cycle = perStart(per(todayISO()));
+  if (todayISO() >= cycle && (!S.lastImport || S.lastImport < cycle) && S.txns.length)
     return `<div class="banner">📅 הגיע הזמן לעדכון החודשי – העלה קבצים חדשים מהבנק ומהאשראי. <button class="chip" data-go="import">לייבוא</button></div>`;
   return '';
 }
 
 function lastDay(m) {
-  const x = S.txns.filter(t => ym(t.date) === m).reduce((a, t) => t.date > a ? t.date : a, '');
+  const x = S.txns.filter(t => per(t.date) === m).reduce((a, t) => t.date > a ? t.date : a, '');
   return x ? +x.slice(8) + '.' + +x.slice(5, 7) : '';
 }
 function viewHome() {
@@ -523,16 +535,16 @@ function viewHome() {
   const max = cats.length ? cats[0][1] : 1;
   const last6 = d.months.slice(-6);
   const tmax = Math.max(1, ...last6.map(x => Math.max(d.byMonth[x].inc, d.byMonth[x].exp)));
-  const partial = idx === 0 || idx === d.months.length - 1;
+  const partial = idx === 0 || perEnd(m) > lastData();
   const lump = cur.cats[CARD_CAT] > 0;
   const H = health(d), rev = review(d, m);
-  const other = d.items.filter(t => ym(t.date) === m && t.cat === 'אחר' && t.kind === 'exp');
+  const other = d.items.filter(t => per(t.date) === m && t.cat === 'אחר' && t.kind === 'exp');
   const otherSum = other.reduce((a, t) => a - t.amount, 0);
   const dot = c => `<i class="dot ${c}"></i>`;
   const rateC = H && H.rate != null ? (H.rate >= 0.2 ? 'g' : H.rate >= 0.1 ? 'y' : 'r') : '';
   const runC = H && H.runway != null ? (H.runway >= 3 ? 'g' : H.runway >= 1 ? 'y' : 'r') : '';
   const costC = H ? (H.cost < 300 ? 'g' : H.cost < 1000 ? 'y' : 'r') : '';
-  const lumpCards = [...new Set(d.items.filter(t => ym(t.date) === m && t.cat === CARD_CAT && t.kind === 'exp').map(t => (t.desc.match(/\b(\d{4})\b/) || [])[1]).filter(Boolean))];
+  const lumpCards = [...new Set(d.items.filter(t => per(t.date) === m && t.cat === CARD_CAT && t.kind === 'exp').map(t => (t.desc.match(/\b(\d{4})\b/) || [])[1]).filter(Boolean))];
 
   const src = sources();
   const noBank = !src.bank;
@@ -540,13 +552,13 @@ function viewHome() {
   ${noBank ? `<div class="banner">⚠️ <b>ייבאת רק קובץ אשראי.</b> בקובץ האשראי יש רק הוצאות, ולכן ההכנסות מוצגות כ-0 בכל החודשים. ייבא גם את קובץ <b>עובר ושב</b> מדיסקונט כדי לראות משכורת, קצבאות והעברות. <button class="chip" data-go="import">לייבוא</button></div>` : ''}
   <div class="months">
     <button data-m="-1" ${idx <= 0 ? 'disabled' : ''} aria-label="חודש קודם">›</button>
-    <div class="title">${mLabel(m)}</div>
+    <div class="title">${mLabel(m)}${perRange(m) ? `<div class="muted" style="font-size:12px;font-weight:400">${perRange(m)}</div>` : ''}</div>
     <button data-m="1" ${idx >= d.months.length - 1 ? 'disabled' : ''} aria-label="חודש הבא">‹</button>
   </div>
   <div class="card hero">
     <div class="label">${free >= 0 ? 'נשאר לך החודש' : 'חרגת החודש'}</div>
     <div class="big ${free >= 0 ? 'pos' : 'neg'}">${money(free)}</div>
-    ${partial ? `<div class="muted">חודש חלקי${idx === d.months.length - 1 ? ' – הנתונים עד ' + lastDay(m) + '. משכורת שמגיעה בסוף החודש עוד לא נספרה' : ' – חסרים נתונים בקצה הטווח'}</div>` : ''}
+    ${partial ? `<div class="muted">תקופה חלקית – הנתונים עד ${dm(lastData())}${perEnd(m) > lastData() ? ', והמחזור נסגר ב-' + dm(perEnd(m)) : ''}</div>` : ''}
   </div>
   <div class="grid2">
     <div class="card stat"><div class="muted">הכנסות</div><div class="num pos">${money(cur.inc)}</div></div>
@@ -593,7 +605,7 @@ function viewInsights() {
   const rate = S.settings.rate;
   const diffTxt = (v, a) => a == null ? '' : `${v >= a ? '+' : '-'}${money(Math.abs(v - a)).replace('-', '')}`;
   return `<div class="months">
-    <button data-m="-1" ${idx <= 0 ? 'disabled' : ''} aria-label="חודש קודם">›</button><div class="title">${mLabel(m)}</div>
+    <button data-m="-1" ${idx <= 0 ? 'disabled' : ''} aria-label="חודש קודם">›</button><div class="title">${mLabel(m)}${perRange(m) ? `<div class="muted" style="font-size:12px;font-weight:400">${perRange(m)}</div>` : ''}</div>
     <button data-m="1" ${idx >= d.months.length - 1 ? 'disabled' : ''} aria-label="חודש הבא">‹</button></div>
   ${partial ? `<div class="note">זה חודש חלקי${idx === d.months.length - 1 ? ' (הנתונים עד ' + lastDay(m) + ')' : ''}, אז ההשוואה לממוצע פחות מדויקת.</div>` : ''}
   ${noBase ? '<div class="note">אין עדיין מספיק חודשים מלאים כדי לחשב ממוצע. ייבא נתונים של לפחות 3 חודשים.</div>' : ''}
@@ -650,7 +662,7 @@ function viewTxns() {
   const d = derived(), m = curMonth();
   if (!m) return `<h1>תנועות</h1>${emptyState()}`;
   const idx = d.months.indexOf(m);
-  let list = d.items.filter(t => ym(t.date) === m);
+  let list = d.items.filter(t => per(t.date) === m);
   if (filter.kind === 'exp') list = list.filter(t => t.kind === 'exp');
   if (filter.kind === 'inc') list = list.filter(t => t.kind === 'inc');
   if (filter.kind === 'other') list = list.filter(t => t.cat === 'אחר');
@@ -663,7 +675,7 @@ function viewTxns() {
   }
   if (day) html += '</div>';
   return `<div class="months">
-    <button data-m="-1" ${idx <= 0 ? 'disabled' : ''} aria-label="חודש קודם">›</button><div class="title">${mLabel(m)}</div>
+    <button data-m="-1" ${idx <= 0 ? 'disabled' : ''} aria-label="חודש קודם">›</button><div class="title">${mLabel(m)}${perRange(m) ? `<div class="muted" style="font-size:12px;font-weight:400">${perRange(m)}</div>` : ''}</div>
     <button data-m="1" ${idx >= d.months.length - 1 ? 'disabled' : ''} aria-label="חודש הבא">‹</button></div>
   <input class="search" id="q" type="search" placeholder="חיפוש בית עסק..." value="${esc(filter.q)}">
   <div class="chips">${[['all', 'הכל'], ['exp', 'הוצאות'], ['inc', 'הכנסות'], ['other', 'ללא קטגוריה']].map(([k, l]) => `<button class="chip ${filter.kind === k ? 'on' : ''}" data-kind="${k}">${l}</button>`).join('')}</div>
@@ -753,6 +765,12 @@ function viewTools() {
     <p class="muted">קרן חירום: 3–6 חודשי הוצאה = ${money(avgExp * 3)} – ${money(avgExp * 6)}. הבנק משלם בערך 0.1% על עו"ש. את ההעברה עושים בעצמך.</p>`}
   </div></details>
 
+  <details><summary>📅 תחילת המחזור החודשי</summary><div class="inner">
+    <p class="muted">באיזה יום מתחיל אצלך החודש הכספי? אם המשכורת נכנסת וחיוב האשראי יורד ב-10, בחר 10, וכל תקופה תתאר מחזור שלם: 10 לחודש עד 9 לחודש הבא.</p>
+    <div class="field"><span>היום בחודש</span><input type="number" id="sd" min="1" max="28" value="${startDay()}"></div>
+    <div class="note">${startDay() === 1 ? 'כרגע: חודש לוח רגיל (1 עד סוף החודש).' : `כרגע: מה-${startDay()} לחודש עד ה-${startDay() - 1} בחודש הבא.`}</div>
+  </div></details>
+
   <details><summary>💳 עדכון הלוואה</summary><div class="inner">
     <p class="muted">אופציונלי. מספיק לעדכן כשההלוואה משתנה (פירעון מוקדם, מחזור או החזר חדש). בלי עדכון האפליקציה מעריכה לפי התנועות בעו"ש.</p>
     <div class="field"><span>יתרה לסילוק (₪)</span><input type="number" id="lb" value="${S.loan ? S.loan.balance : ''}"></div>
@@ -794,6 +812,10 @@ function bindTools() {
     $('#feeOut').innerHTML = `אחרי ${v('fy')} שנים:<br>עם ${v('f1')}% → <b>${money(a)}</b><br>עם ${v('f2')}% → <b>${money(b)}</b><br>ההפרש: <b class="pos">${money(b - a)}</b>`;
   };
   ['fa', 'fr', 'fy', 'f1', 'f2'].forEach(id => $('#' + id).addEventListener('input', calc)); calc();
+  $('#sd').addEventListener('change', e => {
+    const v = Math.min(28, Math.max(1, parseInt(e.target.value) || 1));
+    S.settings.startDay = v; save(); cache = null; selMonth = null; render(); toast('המחזור עודכן');
+  });
   const lc = () => {
     const v = id => parseFloat($('#' + id).value) || 0;
     S.loan = v('lb') > 0 ? { balance: v('lb'), pay: v('lp'), rate: v('lr'), updated: todayISO() } : null; save();
@@ -888,7 +910,7 @@ function addTx() {
     const date = $('#dt').value || todayISO();
     const desc = $('#dsc').value.trim() || label(cat);
     S.txns.push({ id: 'm' + Date.now().toString(36), date, desc, amount: type === 'inc' ? v : -v, src: 'manual', cat });
-    selMonth = ym(date); save(); closeSheet(); render(); toast('נוסף');
+    selMonth = per(date); save(); closeSheet(); render(); toast('נוסף');
   };
 }
 
