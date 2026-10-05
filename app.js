@@ -2,6 +2,7 @@
 /* תזרים מזומנים - כל הנתונים נשמרים רק במכשיר (localStorage). */
 
 const KEY = 'cashflow.v1';
+const VERSION = '2026-10-05-a';
 const MONTHS = ['ינואר','פברואר','מרץ','אפריל','מאי','יוני','יולי','אוגוסט','ספטמבר','אוקטובר','נובמבר','דצמבר'];
 const CARD_CAT = 'כרטיס אשראי';          // חיוב אשראי בעו"ש
 const INTERNAL = 'פנימי';
@@ -750,7 +751,8 @@ function viewTools() {
     <p><button class="btn block" id="bk">⬇️ שמירת גיבוי</button></p>
     <p><button class="btn ghost block" id="rs">⬆️ שחזור מגיבוי</button><input type="file" id="rsf" accept=".json" hidden></p>
     <p><button class="btn danger block" id="wipe">🗑️ מחיקת כל הנתונים</button></p>
-    <p class="muted">${S.txns.length} תנועות שמורות${storageOk ? '' : ' · ⚠️ השמירה במכשיר נכשלה'}</p>
+    <p><button class="btn ghost block" id="upd">🔄 עדכון לגרסה האחרונה</button></p>
+    <p class="muted">גרסה ${VERSION} · ${S.txns.length} תנועות שמורות${storageOk ? '' : ' · ⚠️ השמירה במכשיר נכשלה'}</p>
   </div></details>
   <p class="muted" style="text-align:center">תוכן לימודי בלבד. אינו ייעוץ השקעות, מס או פנסיה.</p>`;
 }
@@ -777,6 +779,10 @@ function bindTools() {
     const blob = new Blob([JSON.stringify(S)], { type: 'application/json' });
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `cashflow-backup-${todayISO()}.json`; a.click();
     toast('הגיבוי נשמר');
+  };
+  $('#upd').onclick = async () => {
+    try { for (const r of await navigator.serviceWorker.getRegistrations()) await r.unregister(); for (const k of await caches.keys()) await caches.delete(k); } catch (e) {}
+    location.reload();
   };
   $('#rs').onclick = () => $('#rsf').click();
   $('#rsf').onchange = async e => {
