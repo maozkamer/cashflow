@@ -2,7 +2,7 @@
 /* תזרים מזומנים - כל הנתונים נשמרים רק במכשיר (localStorage). */
 
 const KEY = 'cashflow.v1';
-const VERSION = '2026-10-05-a';
+const VERSION = '2026-10-05-b';
 const MONTHS = ['ינואר','פברואר','מרץ','אפריל','מאי','יוני','יולי','אוגוסט','ספטמבר','אוקטובר','נובמבר','דצמבר'];
 const CARD_CAT = 'כרטיס אשראי';          // חיוב אשראי בעו"ש
 const INTERNAL = 'פנימי';
@@ -288,6 +288,15 @@ function parseWorkbook(buf) {
   return out;
 }
 
+function sources() {
+  const o = { bank: 0, card: 0, manual: 0, from: '', to: '' };
+  for (const t of S.txns) {
+    o[t.src] = (o[t.src] || 0) + 1;
+    if (!o.from || t.date < o.from) o.from = t.date;
+    if (t.date > o.to) o.to = t.date;
+  }
+  return o;
+}
 function headline() {
   const d = derived(); selMonth = null; const m = curMonth(); if (!m) return '';
   const R = reviewData(d, m), c = R.cur, free = c.inc - c.exp, flags = R.catRows.filter(r => r.flag).slice(0, 3);
@@ -513,7 +522,10 @@ function viewHome() {
   const costC = H ? (H.cost < 300 ? 'g' : H.cost < 1000 ? 'y' : 'r') : '';
   const lumpCards = [...new Set(d.items.filter(t => ym(t.date) === m && t.cat === CARD_CAT && t.kind === 'exp').map(t => (t.desc.match(/\b(\d{4})\b/) || [])[1]).filter(Boolean))];
 
+  const src = sources();
+  const noBank = !src.bank;
   return `${reminderBanner()}
+  ${noBank ? `<div class="banner">⚠️ <b>ייבאת רק קובץ אשראי.</b> בקובץ האשראי יש רק הוצאות, ולכן ההכנסות מוצגות כ-0 בכל החודשים. ייבא גם את קובץ <b>עובר ושב</b> מדיסקונט כדי לראות משכורת, קצבאות והעברות. <button class="chip" data-go="import">לייבוא</button></div>` : ''}
   <div class="months">
     <button data-m="-1" ${idx <= 0 ? 'disabled' : ''} aria-label="חודש קודם">›</button>
     <div class="title">${mLabel(m)}</div>
@@ -752,6 +764,7 @@ function viewTools() {
     <p><button class="btn ghost block" id="rs">⬆️ שחזור מגיבוי</button><input type="file" id="rsf" accept=".json" hidden></p>
     <p><button class="btn danger block" id="wipe">🗑️ מחיקת כל הנתונים</button></p>
     <p><button class="btn ghost block" id="upd">🔄 עדכון לגרסה האחרונה</button></p>
+    <p class="muted">מקורות: ${sources().bank} תנועות עו"ש · ${sources().card} עסקאות אשראי · ${sources().manual} ידניות${sources().from ? ` · מ-${sources().from.split('-').reverse().join('/')} עד ${sources().to.split('-').reverse().join('/')}` : ''}</p>
     <p class="muted">גרסה ${VERSION} · ${S.txns.length} תנועות שמורות${storageOk ? '' : ' · ⚠️ השמירה במכשיר נכשלה'}</p>
   </div></details>
   <p class="muted" style="text-align:center">תוכן לימודי בלבד. אינו ייעוץ השקעות, מס או פנסיה.</p>`;
