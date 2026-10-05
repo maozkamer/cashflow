@@ -2,7 +2,7 @@
 /* תזרים מזומנים - כל הנתונים נשמרים רק במכשיר (localStorage). */
 
 const KEY = 'cashflow.v1';
-const VERSION = '2026-10-05-c';
+const VERSION = '2026-10-05-d';
 const MONTHS = ['ינואר','פברואר','מרץ','אפריל','מאי','יוני','יולי','אוגוסט','ספטמבר','אוקטובר','נובמבר','דצמבר'];
 const CARD_CAT = 'כרטיס אשראי';          // חיוב אשראי בעו"ש
 const INTERNAL = 'פנימי';
@@ -261,6 +261,7 @@ function parseWorkbook(buf) {
       for (const r of rows.slice(hi + 1)) {
         let date = parseDate(r[c.date]); if (!date || typeof r[c.amt] !== 'number') continue;
         const cd = parseDate(r[c.cdate]);
+        const imm = String(r[c.type] ?? '').includes('מיידי') || undefined;
         if (String(r[c.type] ?? '').includes('תשלומים')) date = cd || date;
         const desc = clean(r[c.name]);
         const card = String(r[c.card] ?? '').trim();
@@ -268,7 +269,7 @@ function parseWorkbook(buf) {
         const base = ['card', date, amount, desc, card].join('|');
         const n = seen[base] = (seen[base] || 0) + 1;
         const cat = INVEST.test(desc) ? SAV : DONATE.test(desc) ? 'תרומות' : CARD_MAP[String(r[c.cat] ?? '').trim()] || 'אחר';
-        out.txns.push({ id: hash(base) + '#' + n, date, desc, amount, src: 'card', card, cat, cd });
+        out.txns.push({ id: hash(base) + '#' + n, date, desc, amount, src: 'card', card, cat, cd, imm });
       }
     } else if (head.some(h => h.includes('תיאור התנועה'))) {
       out.kinds.add('bank');
@@ -302,10 +303,11 @@ function upcoming() {
   const today = todayISO(), by = {};
   for (const t of S.txns) {
     if (t.src !== 'card' || !t.cd || t.cd <= today || t.amount >= 0) continue;
-    (by[t.cd] ??= { sum: 0, n: 0, cards: new Set() });
-    by[t.cd].sum -= t.amount; by[t.cd].n++; by[t.cd].cards.add(t.card);
+    const k = t.cd + (t.imm ? '|i' : '');
+    (by[k] ??= { date: t.cd, imm: !!t.imm, sum: 0, n: 0 });
+    by[k].sum -= t.amount; by[k].n++;
   }
-  return Object.entries(by).sort().map(([date, v]) => ({ date, ...v, cards: [...v.cards] }));
+  return Object.values(by).sort((a, b) => a.date.localeCompare(b.date));
 }
 function headline() {
   const d = derived(); selMonth = null; const m = curMonth(); if (!m) return '';
@@ -326,7 +328,7 @@ async function importFiles(files) {
       const have = new Map(S.txns.map(t => [t.id, t]));
       let added = 0, dup = 0;
       for (const t of p.txns) {
-        if (have.has(t.id)) { dup++; const e = have.get(t.id); if (t.cd && !e.cd) e.cd = t.cd; continue; }
+        if (have.has(t.id)) { dup++; const e = have.get(t.id); if (t.cd && !e.cd) { e.cd = t.cd; e.imm = t.imm; } continue; }
         t.cat = applyRule(t); S.txns.push(t); have.set(t.id, t); added++;
       }
       let kind = p.kinds.has('bank') ? 'חשבון עו"ש' : p.kinds.has('card') ? 'כרטיס אשראי' : p.kinds.has('summary') ? 'סיכום חיובי אשראי' : null;
@@ -555,7 +557,7 @@ function viewHome() {
     const total = u.reduce((a, x) => a + x.sum, 0);
     return `<div class="card" style="padding:12px 16px"><div class="row"><div class="emoji" style="font-size:24px">📆</div><div class="grow">
       <b>חיובי אשראי שטרם ירדו: ${money(total)}</b>
-      ${u.slice(0, 3).map(x => `<div class="bar-row" style="grid-template-columns:1fr auto;padding:3px 0"><div class="muted">${x.date.split('-').reverse().slice(0, 2).join('/')} · ${x.n} עסקאות</div><div><b>${money(x.sum)}</b></div></div>`).join('')}
+      ${u.slice(0, 4).map(x => `<div class="bar-row" style="grid-template-columns:1fr auto;padding:3px 0"><div class="muted">${x.date.split('-').reverse().slice(0, 2).join('/')} · ${x.imm ? 'חיוב מיידי (חו"ל)' : 'חיוב מרוכז'} · ${x.n} עסקאות</div><div><b>${money(x.sum)}</b></div></div>`).join('')}
       <div class="muted">כדאי להשאיר את הסכום הזה בחשבון.</div></div></div></div>`; })()}
   ${Object.keys(cur.src).length > 1 ? `<div class="card" style="padding:12px 16px"><b>מאיפה נכנס הכסף</b>${Object.entries(cur.src).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<div class="bar-row" style="grid-template-columns:1fr auto;padding:4px 0"><div>${esc(k)}</div><div><b class="pos">${money(v)}</b></div></div>`).join('')}</div>` : ''}
   ${cur.sav ? `<div class="card" style="padding:12px 16px"><div class="row"><div class="emoji" style="font-size:24px">📈</div><div class="grow"><b>${cur.sav > 0 ? 'הועבר לחיסכון והשקעות' : 'נמשך מחיסכון והשקעות'}: ${money(Math.abs(cur.sav))}</b><div class="muted">זה לא נחשב הוצאה ולא הכנסה.</div></div></div></div>` : ''}
