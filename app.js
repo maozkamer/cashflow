@@ -2,7 +2,7 @@
 /* תזרים מזומנים - כל הנתונים נשמרים רק במכשיר (localStorage). */
 
 const KEY = 'cashflow.v1';
-const VERSION = '2026-10-09-b';
+const VERSION = '2026-10-09-c';
 const MONTHS = ['ינואר','פברואר','מרץ','אפריל','מאי','יוני','יולי','אוגוסט','ספטמבר','אוקטובר','נובמבר','דצמבר'];
 const CARD_CAT = 'כרטיס אשראי';          // חיוב אשראי בעו"ש
 const INTERNAL = 'פנימי';
@@ -536,9 +536,14 @@ function attention(d, m) {
   const cur = d.byMonth[m], out = [], src = sources();
   if (!src.bank) out.push({ ic: '!', tone: 'r', t: 'ייבאת רק קובץ אשראי',
     s: 'בלי קובץ עובר ושב אין הכנסות, וכל המספרים מוטים.', go: 'import', btn: 'לייבוא' });
-  const cycle = perStart(per(todayISO()));
-  if (todayISO() >= cycle && (!S.lastImport || S.lastImport < cycle) && S.txns.length)
-    out.push({ ic: '↻', tone: 'y', t: 'הגיע הזמן לעדכון החודשי', s: 'העלה קבצים חדשים מהבנק ומהאשראי.', go: 'import', btn: 'לייבוא' });
+  const cycle = perStart(per(todayISO())), last = lastData();
+  const gap = last ? Math.round((Date.parse(todayISO()) - Date.parse(last)) / 864e5) : 0;
+  const newCycle = todayISO() >= cycle && (!S.lastImport || S.lastImport < cycle);
+  if (S.txns.length && (gap >= 4 || newCycle))
+    out.push({ ic: '↻', tone: gap >= 10 ? 'r' : 'y',
+      t: gap >= 4 ? `הנתונים מסתיימים ב-${dm(last)}` : 'הגיע הזמן לעדכון החודשי',
+      s: gap >= 4 ? `חסרים ${gap} ימים. משכורת או חיוב שנכנסו מאז עדיין לא מופיעים כאן.` : 'העלה קבצים חדשים מהבנק ומהאשראי.',
+      go: 'import', btn: 'לייבוא' });
   const u = upcoming();
   if (u.length) { const total = u.reduce((a, x) => a + x.sum, 0), n = u.reduce((a, x) => a + x.n, 0);
     out.push({ ic: '₪', tone: 'y', t: `חיובי אשראי שטרם ירדו: ${money(total)}`,
@@ -581,6 +586,15 @@ function monthNav(d, m) {
   </div>`;
 }
 
+function openStrip(d, m) {
+  const cp = per(todayISO()), b = d.byMonth[cp];
+  if (m === cp || !b) return '';
+  const net = b.inc - b.exp;
+  return `<button class="strip" data-pick="${cp}">
+    <span class="grow"><b>${mLabel(cp)} עד כה</b><span class="k">נכנס ${money(b.inc)} · יצא ${money(b.exp)}</span></span>
+    <span class="${net >= 0 ? 'pos' : 'neg'}">${money(net)}</span><span class="go">‹</span></button>`;
+}
+
 function viewHome() {
   const d = derived(), m = curMonth();
   if (!m) return `<h1>תזרים מזומנים</h1>${emptyState()}`;
@@ -597,13 +611,14 @@ function viewHome() {
   const att = attention(d, m), show = att.slice(0, 3);
 
   return `${monthNav(d, m)}
+  ${openStrip(d, m)}
   <div class="card hero">
     <div class="label">${free >= 0 ? 'נשאר לך' : 'חרגת ב'}</div>
     <div class="big ${free >= 0 ? 'pos' : 'neg'}">${money(Math.abs(free))}</div>
     <div class="split">
-      <div class="tap" data-fin="1"><span>נכנס</span><b class="pos">${money(cur.inc)}</b><i>הכנסה אמיתית ›</i></div>
+      <div class="tap" data-fin="1"><span>נכנס</span><b class="pos">${money(cur.inc)}</b><i>הכנסה אמיתית ‹</i></div>
       <div><span>יצא</span><b>${money(cur.exp)}</b><i>${avgExp != null ? `ממוצע ${money(avgExp)}` : '&nbsp;'}</i></div>
-      ${fin > 0 ? `<div class="tap" data-fin="1"><span>נמשך</span><b>${money(fin)}</b><i>לא הכנסה ›</i></div>` : ''}
+      ${fin > 0 ? `<div class="tap" data-fin="1"><span>נמשך</span><b>${money(fin)}</b><i>לא הכנסה ‹</i></div>` : ''}
     </div>
     ${partial ? `<div class="pill">תקופה חלקית · הנתונים עד ${dm(lastData())}${perEnd(m) > lastData() ? ', המחזור נסגר ב-' + dm(perEnd(m)) : ''}</div>` : ''}
   </div>
