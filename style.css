@@ -66,6 +66,10 @@ h2.sec { font-size: 13px; font-weight: 600; color: var(--muted); margin: 26px 6p
 .strip .k { display: block; font-size: 12px; color: var(--muted); font-weight: 400; margin-top: 2px; }
 .strip .go { color: var(--muted); font-size: 18px; font-weight: 400; }
 
+.recon { border-top: 1px solid var(--line); padding: 12px 2px 14px; font-size: 13px;
+  line-height: 1.45; color: var(--muted); text-align: start; }
+.recon b { font-weight: 600; }
+
 /* needs attention */
 .att .arow { display: flex; gap: 12px; align-items: center; padding: 13px 0; border-bottom: 1px solid var(--line); }
 .att .arow:first-child { padding-top: 2px; }

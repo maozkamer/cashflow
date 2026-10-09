@@ -2,7 +2,7 @@
 /* תזרים מזומנים - כל הנתונים נשמרים רק במכשיר (localStorage). */
 
 const KEY = 'cashflow.v1';
-const VERSION = '2026-10-09-e';
+const VERSION = '2026-10-09-f';
 const MONTHS = ['ינואר','פברואר','מרץ','אפריל','מאי','יוני','יולי','אוגוסט','ספטמבר','אוקטובר','נובמבר','דצמבר'];
 const CARD_CAT = 'כרטיס אשראי';          // חיוב אשראי בעו"ש
 const INTERNAL = 'פנימי';
@@ -689,6 +689,25 @@ function openStrip(d, m) {
     <span class="${net >= 0 ? 'pos' : 'neg'}">${money(net)}</span><span class="go">‹</span></button>`;
 }
 
+/* "חרגת" is income minus expenses. The account can still climb in the same month,
+   because money pulled in from savings is not income and card bills land late.
+   Without the account's own movement next to it the two look like a contradiction. */
+function reconcile(d, m) {
+  const bank = d.items.filter(t => t.src === 'bank' && per(t.date) === m);
+  if (!bank.length) return '';
+  const flow = bank.reduce((a, t) => a + t.amount, 0);
+  if (Math.abs(flow) < 1) return '';
+  const b = d.byMonth[m], free = b.inc - b.exp, fin = b.fin || 0, up = flow > 0;
+  const amt = `<b class="${up ? 'pos' : 'neg'}">${money(Math.abs(flow))}</b>`;
+  let txt;
+  if (free < 0 && up) txt = fin > 0
+    ? `היתרה בחשבון דווקא עלתה ב-${amt} — בעיקר בזכות ${money(fin)} שמשכת מחיסכון או מחשבון אחר.`
+    : `היתרה בחשבון דווקא עלתה ב-${amt}, בגלל הפרש העיתוי בין מועד הקנייה למועד החיוב.`;
+  else if (free > 0 && !up) txt = `היתרה בחשבון ירדה ב-${amt}, בגלל חיובי אשראי שירדו החודש על קניות קודמות.`;
+  else txt = `היתרה בחשבון ${up ? 'עלתה' : 'ירדה'} ב-${amt} בתקופה הזו.`;
+  return `<div class="recon">${txt}</div>`;
+}
+
 function viewHome() {
   const d = derived(), m = curMonth();
   if (!m) return `<h1>תזרים מזומנים</h1>${emptyState()}`;
@@ -714,6 +733,7 @@ function viewHome() {
       <div><span>יצא</span><b>${money(cur.exp)}</b><i>${avgExp != null ? `ממוצע ${money(avgExp)}` : '&nbsp;'}</i></div>
       ${fin > 0 ? `<div class="tap" data-fin="1"><span>נמשך</span><b>${money(fin)}</b><i>לא הכנסה ‹</i></div>` : ''}
     </div>
+    ${reconcile(d, m)}
     ${partial ? `<div class="pill">תקופה חלקית · הנתונים עד ${dm(lastData())}${perEnd(m) > lastData() ? ', המחזור נסגר ב-' + dm(perEnd(m)) : ''}</div>` : ''}
   </div>
 
