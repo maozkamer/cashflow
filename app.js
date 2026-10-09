@@ -2,7 +2,7 @@
 /* תזרים מזומנים - כל הנתונים נשמרים רק במכשיר (localStorage). */
 
 const KEY = 'cashflow.v1';
-const VERSION = '2026-10-05-e';
+const VERSION = '2026-10-09-a';
 const MONTHS = ['ינואר','פברואר','מרץ','אפריל','מאי','יוני','יולי','אוגוסט','ספטמבר','אוקטובר','נובמבר','דצמבר'];
 const CARD_CAT = 'כרטיס אשראי';          // חיוב אשראי בעו"ש
 const INTERNAL = 'פנימי';
@@ -118,17 +118,18 @@ function derived() {
       const from = m ? cardFrom[m[1]] : anyFrom;
       return from && t.date >= from ? 'int' : 'exp';
     }
-    if (t.cat === INTERNAL) return t.amount > 0 && t.src === 'bank' ? 'inc' : 'int';
-    if (t.cat === SAV) return t.amount > 0 && t.src === 'bank' ? 'inc' : 'sav';
+    if (t.cat === INTERNAL) return t.amount > 0 && t.src === 'bank' ? 'fin' : 'int';
+    if (t.cat === SAV) return t.amount > 0 && t.src === 'bank' ? 'fin' : 'sav';
     return INCOME_CATS.includes(t.cat) ? 'inc' : 'exp';
   };
   const byMonth = {};
   const items = S.txns.map(t => ({ ...t, kind: kind(t) }));
   for (const t of items) {
-    const m = (byMonth[per(t.date)] ??= { inc: 0, exp: 0, sav: 0, cats: {}, src: {}, n: 0 });
+    const m = (byMonth[per(t.date)] ??= { inc: 0, exp: 0, sav: 0, fin: 0, cats: {}, src: {}, finSrc: {}, n: 0 });
     m.n++;
     if (t.cat === SAV) m.sav -= t.amount;
     if (t.kind === 'inc') { m.inc += t.amount; const l = incLabel(t); m.src[l] = (m.src[l] || 0) + t.amount; }
+    else if (t.kind === 'fin') { m.fin += t.amount; const l = incLabel(t); m.finSrc[l] = (m.finSrc[l] || 0) + t.amount; }
     else if (t.kind === 'exp') { m.exp -= t.amount; m.cats[t.cat] = (m.cats[t.cat] || 0) - t.amount; }
   }
   const months = Object.keys(byMonth).sort();
@@ -152,18 +153,21 @@ function position(d) {
   let best = null;
   for (const t of S.txns) if (t.src === 'bank' && t.bal != null && (!best || t.date > best.date)) best = t;
   const netDep = -S.txns.filter(t => t.cat === SAV && /פיקדון|פקדון/.test(t.desc)).reduce((a, t) => a + t.amount, 0);
-  return { curBal: best ? best.bal : null, netDep };
+  const manual = Number(S.settings.savings) > 0 ? Number(S.settings.savings) : null;
+  return { curBal: best ? best.bal : null, netDep, extra: manual != null ? manual : Math.max(0, netDep), manual };
 }
 function health(d) {
   const fm = fullMonths(d); if (!fm.length) return null;
   const inc = fm.reduce((a, m) => a + d.byMonth[m].inc, 0), exp = fm.reduce((a, m) => a + d.byMonth[m].exp, 0);
   const avgExp = exp / fm.length;
-  const { curBal, netDep } = position(d);
-  const liquid = curBal == null ? null : curBal + Math.max(0, netDep);
+  const { curBal, extra, manual } = position(d);
+  const liquid = curBal == null ? null : curBal + extra;
+  const fin = fm.reduce((a, x) => a + (d.byMonth[x].fin || 0), 0);
+  const negM = fm.filter(x => d.byMonth[x].inc - d.byMonth[x].exp < 0).length;
   const [y, mo] = d.months[d.months.length - 1].split('-').map(Number);
   const from = new Date(Date.UTC(y, mo - 12, 1)).toISOString().slice(0, 7);
   const cost = d.items.filter(t => t.cat === 'ריבית ועמלות' && t.kind === 'exp' && per(t.date) >= from).reduce((a, t) => a - t.amount, 0);
-  return { cost: Math.max(0, cost), rate: inc > 0 ? (inc - exp) / inc : null, avgExp, runway: liquid != null && avgExp > 0 ? liquid / avgExp : null, liquid };
+  return { cost: Math.max(0, cost), rate: inc > 0 ? (inc - exp) / inc : null, avgExp, runway: liquid != null && avgExp > 0 ? liquid / avgExp : null, liquid, manual, fin, negM, nMonths: fm.length };
 }
 function review(d, m) {
   const fm = fullMonths(d);
@@ -482,6 +486,7 @@ function aiSummary(d, m) {
 
 נתוני ${mLabel(m)}:
 הכנסות ${f(c.inc)} (ממוצע ${f(R.avgInc)}). הוצאות ${f(c.exp)} (ממוצע ${f(R.avgExp)}). נשאר ${f(c.inc - c.exp)} (ממוצע ${f(R.avgFree)}).
+משיכות מחיסכון ומחשבונות אחרים שלי שנכנסו לחשבון החודש (לא הכנסה): ${f(c.fin || 0)}.
 קטגוריות (החודש / ממוצע):
 ${R.catRows.map(r => `- ${label(r.c)}: ${f(r.v)} / ${f(r.a)}${r.flag ? ' (חריגה)' : ''}`).join('\n')}
 חיובים קבועים: ${recurring(d).slice(0, 8).map(r => `${r.name.slice(0, 20)} ${Math.round(r.monthly)}/חודש`).join('; ')}
@@ -527,7 +532,7 @@ function lastDay(m) {
 function viewHome() {
   const d = derived(), m = curMonth();
   if (!m) return `<h1>תזרים מזומנים</h1>${emptyState()}`;
-  const cur = d.byMonth[m], free = cur.inc - cur.exp;
+  const cur = d.byMonth[m], free = cur.inc - cur.exp, fin = cur.fin || 0;
   const idx = d.months.indexOf(m);
   const others = fullMonths(d).filter(x => x !== m);
   const avgExp = others.length ? others.reduce((s, x) => s + d.byMonth[x].exp, 0) / others.length : null;
@@ -558,10 +563,13 @@ function viewHome() {
   <div class="card hero">
     <div class="label">${free >= 0 ? 'נשאר לך החודש' : 'חרגת החודש'}</div>
     <div class="big ${free >= 0 ? 'pos' : 'neg'}">${money(free)}</div>
+    <div class="muted">הכנסה אמיתית פחות הוצאות</div>
+    ${fin > 0 ? `<div class="muted" style="margin-top:6px">בנוסף נכנסו ${money(fin)} ממשיכה מחיסכון או מחשבון אחר שלך. זה לא הכנסה – זה כסף שכבר היה שלך${free < 0 ? ', והוא מה שסגר את החודש' : ''}.</div>` : ''}
     ${partial ? `<div class="muted">תקופה חלקית – הנתונים עד ${dm(lastData())}${perEnd(m) > lastData() ? ', והמחזור נסגר ב-' + dm(perEnd(m)) : ''}</div>` : ''}
   </div>
   <div class="grid2">
-    <div class="card stat"><div class="muted">הכנסות</div><div class="num pos">${money(cur.inc)}</div></div>
+    <div class="card stat"><div class="muted">הכנסות</div><div class="num pos">${money(cur.inc)}</div>
+      ${fin > 0 ? `<div class="muted">+${money(fin)} ממשיכות (לא הכנסה)</div>` : ''}</div>
     <div class="card stat"><div class="muted">הוצאות</div><div class="num neg">${money(cur.exp)}</div>
       ${avgExp != null ? `<div class="muted">ממוצע חודשי: ${money(avgExp)}</div>` : ''}</div>
   </div>
@@ -571,7 +579,7 @@ function viewHome() {
       <b>חיובי אשראי שטרם ירדו: ${money(total)}</b>
       ${u.slice(0, 4).map(x => `<div class="bar-row" style="grid-template-columns:1fr auto;padding:3px 0"><div class="muted">${x.date.split('-').reverse().slice(0, 2).join('/')} · ${x.imm ? 'חיוב מיידי (חו"ל)' : 'חיוב מרוכז'} · ${x.n} עסקאות</div><div><b>${money(x.sum)}</b></div></div>`).join('')}
       <div class="muted">כדאי להשאיר את הסכום הזה בחשבון.</div></div></div></div>`; })()}
-  ${Object.keys(cur.src).length > 1 ? `<div class="card" style="padding:12px 16px"><b>מאיפה נכנס הכסף</b>${Object.entries(cur.src).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<div class="bar-row" style="grid-template-columns:1fr auto;padding:4px 0"><div>${esc(k)}</div><div><b class="pos">${money(v)}</b></div></div>`).join('')}</div>` : ''}
+  ${Object.keys(cur.src).length + Object.keys(cur.finSrc).length > 1 ? `<div class="card" style="padding:12px 16px"><b>מאיפה נכנס הכסף</b>${Object.entries(cur.src).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<div class="bar-row" style="grid-template-columns:1fr auto;padding:4px 0"><div>${esc(k)}</div><div><b class="pos">${money(v)}</b></div></div>`).join('')}${Object.keys(cur.finSrc).length ? `<div class="muted" style="margin-top:8px">לא הכנסה – כסף שהעברת לעצמך:</div>${Object.entries(cur.finSrc).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<div class="bar-row" style="grid-template-columns:1fr auto;padding:4px 0"><div>${esc(k)}</div><div><b>${money(v)}</b></div></div>`).join('')}` : ''}</div>` : ''}
   ${cur.sav ? `<div class="card" style="padding:12px 16px"><div class="row"><div class="emoji" style="font-size:24px">📈</div><div class="grow"><b>${cur.sav > 0 ? 'הועבר לחיסכון והשקעות' : 'נמשך מחיסכון והשקעות'}: ${money(Math.abs(cur.sav))}</b><div class="muted">זה לא נחשב הוצאה ולא הכנסה.</div></div></div></div>` : ''}
   ${lump ? `<div class="note">💡 "אשראי ללא פירוט"${lumpCards.length ? ' (כרטיס ' + lumpCards.join(', ') + ')' : ''} מופיע כסכום אחד כי אין לו קובץ פירוט עסקאות. אפשר להוריד מהאתר קובץ עסקאות מפורט של הכרטיס ולייבא אותו.</div>` : ''}
   ${other.length ? `<div class="note">🏷️ ${other.length} תנועות (${money(otherSum)}) ללא קטגוריה. <button class="chip" data-other="1">לתיקון</button></div>` : ''}
@@ -585,7 +593,8 @@ function viewHome() {
     <div class="muted" style="margin-top:6px">שאל את עצמך: האם זה חד-פעמי או הרגל שנוצר?</div></div>` : ''}
   ${H ? `<h2>מצב פיננסי</h2><div class="card health">
     ${H.rate != null ? `<div class="hrow">${dot(rateC)}<div class="grow"><b>שיעור חיסכון: ${Math.round(H.rate * 100)}%</b><div class="muted">${H.rate >= 0.2 ? 'מצוין – 20% ומעלה.' : H.rate >= 0.1 ? 'סביר. היעד המקובל הוא 20%.' : H.rate >= 0 ? 'נמוך. כדאי לחפש דליפות בכלים.' : 'ההוצאות גבוהות מההכנסות בממוצע.'}</div></div></div>` : ''}
-    ${H.runway != null ? `<div class="hrow">${dot(runC)}<div class="grow"><b>כרית ביטחון: ${H.runway.toFixed(1)} חודשי הוצאה</b><div class="muted">${money(H.liquid)} בעו"ש הזה. חיסכון וחשבונות אחרים לא נספרים. מקובל 3–6 חודשים.</div></div></div>` : ''}
+    ${H.runway != null ? `<div class="hrow">${dot(runC)}<div class="grow"><b>כרית ביטחון: ${H.runway.toFixed(1)} חודשי הוצאה</b><div class="muted">${money(H.liquid)} נזילים${H.manual ? ' (עו"ש + חיסכון שהזנת בכלים)' : '. חיסכון וחשבונות אחרים לא נספרים – אפשר להזין אותם בכלים'}. מקובל 3–6 חודשים.</div></div></div>` : ''}
+    ${H.fin > 0 ? `<div class="hrow">${dot(H.negM > H.nMonths / 2 ? 'r' : 'y')}<div class="grow"><b>כיסוי ממשיכות: ${money(H.fin)} ב-${H.nMonths} חודשים</b><div class="muted">זה הכסף שמשכת מחיסכון או מחשבון אחר כדי לסגור חודשים. ב-${H.negM} מתוך ${H.nMonths} חודשים ההוצאות היו גבוהות מההכנסה. זו הסיבה שהיתרה בעו"ש נמוכה.</div></div></div>` : ''}
     <div class="hrow">${dot(costC)}<div class="grow"><b>ריבית ועמלות ב-12 חודשים: ${money(H.cost)}</b><div class="muted">${H.cost < 300 ? 'נמוך, יופי.' : 'אפשר להוריד: הקטן מסגרת אוברדרפט ובדוק פטור מעמלות.'}</div></div></div>
   </div>` : ''}
   <h2>6 חודשים אחרונים</h2>
@@ -747,9 +756,9 @@ function viewTools() {
   </div></details>
 
   <details><summary>📅 סיכום חודשי</summary><div class="inner">
-    ${d.months.length ? `<table class="t"><tr><th></th><th class="n">הכנסות</th><th class="n">הוצאות</th><th class="n">נשאר</th></tr>
-    ${[...d.months].reverse().map(x => { const b = d.byMonth[x], f = b.inc - b.exp; return `<tr><td>${mShort(x)} ${x.slice(2, 4)}${fullMonths(d).includes(x) ? '' : '*'}</td><td class="n">${money(b.inc)}</td><td class="n">${money(b.exp)}</td><td class="n ${f >= 0 ? 'pos' : 'neg'}"><b>${money(f)}</b></td></tr>`; }).join('')}</table>
-    <p class="muted">* חודש חלקי – חסרים נתונים בקצה הטווח.</p>` : '<p class="muted">אין נתונים.</p>'}
+    ${d.months.length ? `<table class="t"><tr><th></th><th class="n">הכנסות</th><th class="n">הוצאות</th><th class="n">נשאר</th><th class="n">נמשך</th></tr>
+    ${[...d.months].reverse().map(x => { const b = d.byMonth[x], f = b.inc - b.exp; return `<tr><td>${mShort(x)} ${x.slice(2, 4)}${fullMonths(d).includes(x) ? '' : '*'}</td><td class="n">${money(b.inc)}</td><td class="n">${money(b.exp)}</td><td class="n ${f >= 0 ? 'pos' : 'neg'}"><b>${money(f)}</b></td><td class="n muted">${b.fin ? money(b.fin) : ''}</td></tr>`; }).join('')}</table>
+    <p class="muted">* חודש חלקי – חסרים נתונים בקצה הטווח. "נמשך" = כסף שהעברת לעצמך מחיסכון או מחשבון אחר, ולכן אינו נספר כהכנסה.</p>` : '<p class="muted">אין נתונים.</p>'}
   </div></details>
 
   <details><summary>💰 כסף שיושב בחשבון בלי לעבוד</summary><div class="inner">
@@ -768,6 +777,8 @@ function viewTools() {
   <details><summary>📅 תחילת המחזור החודשי</summary><div class="inner">
     <p class="muted">באיזה יום מתחיל אצלך החודש הכספי? אם המשכורת נכנסת וחיוב האשראי יורד ב-10, בחר 10, וכל תקופה תתאר מחזור שלם: 10 לחודש עד 9 לחודש הבא.</p>
     <div class="field"><span>היום בחודש</span><input type="number" id="sd" min="1" max="28" value="${startDay()}"></div>
+    <div class="field"><span>יתרה בחיסכון / השקעות (₪)</span><input type="number" id="svb" min="0" step="100" value="${S.settings.savings || ''}" placeholder="לא הוזן"></div>
+    <p class="muted">כסף נזיל שלך מחוץ לעו"ש הזה (פיקדון, קרן כספית, בלינק וכו'). משמש רק לחישוב כרית הביטחון.</p>
     <div class="note">${startDay() === 1 ? 'כרגע: חודש לוח רגיל (1 עד סוף החודש).' : `כרגע: מה-${startDay()} לחודש עד ה-${startDay() - 1} בחודש הבא.`}</div>
   </div></details>
 
@@ -812,6 +823,11 @@ function bindTools() {
     $('#feeOut').innerHTML = `אחרי ${v('fy')} שנים:<br>עם ${v('f1')}% → <b>${money(a)}</b><br>עם ${v('f2')}% → <b>${money(b)}</b><br>ההפרש: <b class="pos">${money(b - a)}</b>`;
   };
   ['fa', 'fr', 'fy', 'f1', 'f2'].forEach(id => $('#' + id).addEventListener('input', calc)); calc();
+  const sv = $('#svb');
+  if (sv) sv.addEventListener('change', () => {
+    const v = parseFloat(sv.value);
+    S.settings.savings = v > 0 ? v : undefined; save(); render(); toast('עודכן');
+  });
   $('#sd').addEventListener('change', e => {
     const v = Math.min(28, Math.max(1, parseInt(e.target.value) || 1));
     S.settings.startDay = v; save(); cache = null; selMonth = null; render(); toast('המחזור עודכן');
