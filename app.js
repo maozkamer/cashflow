@@ -2,7 +2,7 @@
 /* תזרים מזומנים - כל הנתונים נשמרים רק במכשיר (localStorage). */
 
 const KEY = 'cashflow.v1';
-const VERSION = '2026-10-09-a';
+const VERSION = '2026-10-09-b';
 const MONTHS = ['ינואר','פברואר','מרץ','אפריל','מאי','יוני','יולי','אוגוסט','ספטמבר','אוקטובר','נובמבר','דצמבר'];
 const CARD_CAT = 'כרטיס אשראי';          // חיוב אשראי בעו"ש
 const INTERNAL = 'פנימי';
@@ -529,6 +529,58 @@ function lastDay(m) {
   const x = S.txns.filter(t => per(t.date) === m).reduce((a, t) => t.date > a ? t.date : a, '');
   return x ? +x.slice(8) + '.' + +x.slice(5, 7) : '';
 }
+let showAllCats = false;
+
+/* one list of everything that needs a decision, most trust-breaking first */
+function attention(d, m) {
+  const cur = d.byMonth[m], out = [], src = sources();
+  if (!src.bank) out.push({ ic: '!', tone: 'r', t: 'ייבאת רק קובץ אשראי',
+    s: 'בלי קובץ עובר ושב אין הכנסות, וכל המספרים מוטים.', go: 'import', btn: 'לייבוא' });
+  const cycle = perStart(per(todayISO()));
+  if (todayISO() >= cycle && (!S.lastImport || S.lastImport < cycle) && S.txns.length)
+    out.push({ ic: '↻', tone: 'y', t: 'הגיע הזמן לעדכון החודשי', s: 'העלה קבצים חדשים מהבנק ומהאשראי.', go: 'import', btn: 'לייבוא' });
+  const u = upcoming();
+  if (u.length) { const total = u.reduce((a, x) => a + x.sum, 0), n = u.reduce((a, x) => a + x.n, 0);
+    out.push({ ic: '₪', tone: 'y', t: `חיובי אשראי שטרם ירדו: ${money(total)}`,
+      s: `${n} עסקאות, הקרוב ב-${u[0].date.split('-').reverse().slice(0, 2).join('/')}. כדאי להשאיר את הסכום בחשבון.` }); }
+  if (cur.cats[CARD_CAT] > 0) {
+    const cards = [...new Set(d.items.filter(t => per(t.date) === m && t.cat === CARD_CAT && t.kind === 'exp')
+      .map(t => (t.desc.match(/\b(\d{4})\b/) || [])[1]).filter(Boolean))];
+    out.push({ ic: '?', tone: 'y', t: `${money(cur.cats[CARD_CAT])} אשראי בלי פירוט`,
+      s: `לכרטיס ${cards.join(', ') || 'הזה'} אין קובץ עסקאות, אז לא רואים לאן הכסף הלך.`, go: 'import', btn: 'לייבוא' });
+  }
+  for (const r of review(d, m).slice(0, 2))
+    out.push({ ic: CATS[r.c] || '📦', emoji: true, tone: 'r', t: `${label(r.c)} גבוה ב-${money(r.diff)} מהממוצע`,
+      s: 'שווה לבדוק אם זה חד-פעמי או הרגל שנוצר.', go: 'insights', btn: 'לסקירה' });
+  const unc = d.items.filter(t => per(t.date) === m && t.cat === 'אחר' && t.kind === 'exp');
+  if (unc.length) out.push({ ic: '•', tone: 'n', t: `${unc.length} תנועות ללא קטגוריה`,
+    s: `${money(unc.reduce((a, t) => a - t.amount, 0))} שלא מסווגים פוגעים בדיוק של כל השאר.`, other: 1, btn: 'לסיווג' });
+  return out;
+}
+
+function healthCard(d) {
+  const H = health(d); if (!H) return '';
+  const dot = c => `<i class="dot ${c}"></i>`;
+  const rateC = H.rate != null ? (H.rate >= 0.2 ? 'g' : H.rate >= 0.1 ? 'y' : 'r') : '';
+  const runC = H.runway != null ? (H.runway >= 3 ? 'g' : H.runway >= 1 ? 'y' : 'r') : '';
+  const costC = H.cost < 300 ? 'g' : H.cost < 1000 ? 'y' : 'r';
+  return `<div class="card health">
+    ${H.rate != null ? `<div class="hrow">${dot(rateC)}<div class="grow"><b>שיעור חיסכון: ${Math.round(H.rate * 100)}%</b><div class="muted">${H.rate >= 0.2 ? 'מצוין – 20% ומעלה.' : H.rate >= 0.1 ? 'סביר. היעד המקובל הוא 20%.' : H.rate >= 0 ? 'נמוך. כדאי לחפש דליפות בכלים.' : 'ההוצאות גבוהות מההכנסות בממוצע.'}</div></div></div>` : ''}
+    ${H.runway != null ? `<div class="hrow">${dot(runC)}<div class="grow"><b>כרית ביטחון: ${H.runway.toFixed(1)} חודשי הוצאה</b><div class="muted">${money(H.liquid)} נזילים${H.manual ? ' (עו"ש + חיסכון שהזנת בכלים)' : '. חיסכון וחשבונות אחרים לא נספרים – אפשר להזין אותם בכלים'}. מקובל 3–6 חודשים.</div></div></div>` : ''}
+    ${H.fin > 0 ? `<div class="hrow">${dot(H.negM > H.nMonths / 2 ? 'r' : 'y')}<div class="grow"><b>כיסוי ממשיכות: ${money(H.fin)} ב-${H.nMonths} חודשים</b><div class="muted">זה הכסף שמשכת מחיסכון או מחשבון אחר כדי לסגור חודשים. ב-${H.negM} מתוך ${H.nMonths} חודשים ההוצאות היו גבוהות מההכנסה. זו הסיבה שהיתרה בעו"ש נמוכה.</div></div></div>` : ''}
+    <div class="hrow">${dot(costC)}<div class="grow"><b>ריבית ועמלות ב-12 חודשים: ${money(H.cost)}</b><div class="muted">${H.cost < 300 ? 'נמוך, יופי.' : 'אפשר להוריד: הקטן מסגרת אוברדרפט ובדוק פטור מעמלות.'}</div></div></div>
+  </div>`;
+}
+
+function monthNav(d, m) {
+  const idx = d.months.indexOf(m);
+  return `<div class="months">
+    <button data-m="-1" ${idx <= 0 ? 'disabled' : ''} aria-label="חודש קודם">›</button>
+    <div class="title">${mLabel(m)}${perRange(m) ? `<div class="muted" style="font-size:12px;font-weight:400">${perRange(m)}</div>` : ''}</div>
+    <button data-m="1" ${idx >= d.months.length - 1 ? 'disabled' : ''} aria-label="חודש הבא">‹</button>
+  </div>`;
+}
+
 function viewHome() {
   const d = derived(), m = curMonth();
   if (!m) return `<h1>תזרים מזומנים</h1>${emptyState()}`;
@@ -538,72 +590,58 @@ function viewHome() {
   const avgExp = others.length ? others.reduce((s, x) => s + d.byMonth[x].exp, 0) / others.length : null;
   const cats = Object.entries(cur.cats).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
   const max = cats.length ? cats[0][1] : 1;
+  const shown = showAllCats ? cats : cats.slice(0, 5);
   const last6 = d.months.slice(-6);
   const tmax = Math.max(1, ...last6.map(x => Math.max(d.byMonth[x].inc, d.byMonth[x].exp)));
   const partial = idx === 0 || perEnd(m) > lastData();
-  const lump = cur.cats[CARD_CAT] > 0;
-  const H = health(d), rev = review(d, m);
-  const other = d.items.filter(t => per(t.date) === m && t.cat === 'אחר' && t.kind === 'exp');
-  const otherSum = other.reduce((a, t) => a - t.amount, 0);
-  const dot = c => `<i class="dot ${c}"></i>`;
-  const rateC = H && H.rate != null ? (H.rate >= 0.2 ? 'g' : H.rate >= 0.1 ? 'y' : 'r') : '';
-  const runC = H && H.runway != null ? (H.runway >= 3 ? 'g' : H.runway >= 1 ? 'y' : 'r') : '';
-  const costC = H ? (H.cost < 300 ? 'g' : H.cost < 1000 ? 'y' : 'r') : '';
-  const lumpCards = [...new Set(d.items.filter(t => per(t.date) === m && t.cat === CARD_CAT && t.kind === 'exp').map(t => (t.desc.match(/\b(\d{4})\b/) || [])[1]).filter(Boolean))];
+  const att = attention(d, m), show = att.slice(0, 3);
 
-  const src = sources();
-  const noBank = !src.bank;
-  return `${reminderBanner()}
-  ${noBank ? `<div class="banner">⚠️ <b>ייבאת רק קובץ אשראי.</b> בקובץ האשראי יש רק הוצאות, ולכן ההכנסות מוצגות כ-0 בכל החודשים. ייבא גם את קובץ <b>עובר ושב</b> מדיסקונט כדי לראות משכורת, קצבאות והעברות. <button class="chip" data-go="import">לייבוא</button></div>` : ''}
-  <div class="months">
-    <button data-m="-1" ${idx <= 0 ? 'disabled' : ''} aria-label="חודש קודם">›</button>
-    <div class="title">${mLabel(m)}${perRange(m) ? `<div class="muted" style="font-size:12px;font-weight:400">${perRange(m)}</div>` : ''}</div>
-    <button data-m="1" ${idx >= d.months.length - 1 ? 'disabled' : ''} aria-label="חודש הבא">‹</button>
-  </div>
+  return `${monthNav(d, m)}
   <div class="card hero">
-    <div class="label">${free >= 0 ? 'נשאר לך החודש' : 'חרגת החודש'}</div>
-    <div class="big ${free >= 0 ? 'pos' : 'neg'}">${money(free)}</div>
-    <div class="muted">הכנסה אמיתית פחות הוצאות</div>
-    ${fin > 0 ? `<div class="muted" style="margin-top:6px">בנוסף נכנסו ${money(fin)} ממשיכה מחיסכון או מחשבון אחר שלך. זה לא הכנסה – זה כסף שכבר היה שלך${free < 0 ? ', והוא מה שסגר את החודש' : ''}.</div>` : ''}
-    ${partial ? `<div class="muted">תקופה חלקית – הנתונים עד ${dm(lastData())}${perEnd(m) > lastData() ? ', והמחזור נסגר ב-' + dm(perEnd(m)) : ''}</div>` : ''}
+    <div class="label">${free >= 0 ? 'נשאר לך' : 'חרגת ב'}</div>
+    <div class="big ${free >= 0 ? 'pos' : 'neg'}">${money(Math.abs(free))}</div>
+    <div class="split">
+      <div class="tap" data-fin="1"><span>נכנס</span><b class="pos">${money(cur.inc)}</b><i>הכנסה אמיתית ›</i></div>
+      <div><span>יצא</span><b>${money(cur.exp)}</b><i>${avgExp != null ? `ממוצע ${money(avgExp)}` : '&nbsp;'}</i></div>
+      ${fin > 0 ? `<div class="tap" data-fin="1"><span>נמשך</span><b>${money(fin)}</b><i>לא הכנסה ›</i></div>` : ''}
+    </div>
+    ${partial ? `<div class="pill">תקופה חלקית · הנתונים עד ${dm(lastData())}${perEnd(m) > lastData() ? ', המחזור נסגר ב-' + dm(perEnd(m)) : ''}</div>` : ''}
   </div>
-  <div class="grid2">
-    <div class="card stat"><div class="muted">הכנסות</div><div class="num pos">${money(cur.inc)}</div>
-      ${fin > 0 ? `<div class="muted">+${money(fin)} ממשיכות (לא הכנסה)</div>` : ''}</div>
-    <div class="card stat"><div class="muted">הוצאות</div><div class="num neg">${money(cur.exp)}</div>
-      ${avgExp != null ? `<div class="muted">ממוצע חודשי: ${money(avgExp)}</div>` : ''}</div>
-  </div>
-  ${(() => { const u = upcoming(); if (!u.length) return '';
-    const total = u.reduce((a, x) => a + x.sum, 0);
-    return `<div class="card" style="padding:12px 16px"><div class="row"><div class="emoji" style="font-size:24px">📆</div><div class="grow">
-      <b>חיובי אשראי שטרם ירדו: ${money(total)}</b>
-      ${u.slice(0, 4).map(x => `<div class="bar-row" style="grid-template-columns:1fr auto;padding:3px 0"><div class="muted">${x.date.split('-').reverse().slice(0, 2).join('/')} · ${x.imm ? 'חיוב מיידי (חו"ל)' : 'חיוב מרוכז'} · ${x.n} עסקאות</div><div><b>${money(x.sum)}</b></div></div>`).join('')}
-      <div class="muted">כדאי להשאיר את הסכום הזה בחשבון.</div></div></div></div>`; })()}
-  ${Object.keys(cur.src).length + Object.keys(cur.finSrc).length > 1 ? `<div class="card" style="padding:12px 16px"><b>מאיפה נכנס הכסף</b>${Object.entries(cur.src).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<div class="bar-row" style="grid-template-columns:1fr auto;padding:4px 0"><div>${esc(k)}</div><div><b class="pos">${money(v)}</b></div></div>`).join('')}${Object.keys(cur.finSrc).length ? `<div class="muted" style="margin-top:8px">לא הכנסה – כסף שהעברת לעצמך:</div>${Object.entries(cur.finSrc).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<div class="bar-row" style="grid-template-columns:1fr auto;padding:4px 0"><div>${esc(k)}</div><div><b>${money(v)}</b></div></div>`).join('')}` : ''}</div>` : ''}
-  ${cur.sav ? `<div class="card" style="padding:12px 16px"><div class="row"><div class="emoji" style="font-size:24px">📈</div><div class="grow"><b>${cur.sav > 0 ? 'הועבר לחיסכון והשקעות' : 'נמשך מחיסכון והשקעות'}: ${money(Math.abs(cur.sav))}</b><div class="muted">זה לא נחשב הוצאה ולא הכנסה.</div></div></div></div>` : ''}
-  ${lump ? `<div class="note">💡 "אשראי ללא פירוט"${lumpCards.length ? ' (כרטיס ' + lumpCards.join(', ') + ')' : ''} מופיע כסכום אחד כי אין לו קובץ פירוט עסקאות. אפשר להוריד מהאתר קובץ עסקאות מפורט של הכרטיס ולייבא אותו.</div>` : ''}
-  ${other.length ? `<div class="note">🏷️ ${other.length} תנועות (${money(otherSum)}) ללא קטגוריה. <button class="chip" data-other="1">לתיקון</button></div>` : ''}
-  <h2>לאן הלך הכסף <span class="muted">· לחץ להגדרת תקציב</span></h2>
-  <div class="card">${cats.length ? cats.map(([c, v]) => { const b = S.budgets[c], over = b && v > b; return `
+
+  ${show.length ? `<h2 class="sec">דורש תשומת לב</h2>
+  <div class="card att">${show.map(a => `<div class="arow">
+      <div class="aic ${a.emoji ? 'e' : a.tone}">${a.ic}</div>
+      <div class="grow"><b>${esc(a.t)}</b><div class="muted">${esc(a.s)}</div></div>
+      ${a.btn ? `<button class="chip" ${a.go ? `data-go="${a.go}"` : 'data-other="1"'}>${a.btn}</button>` : ''}
+    </div>`).join('')}
+    ${att.length > show.length ? `<button class="more" data-go="insights">עוד ${att.length - show.length} בסקירה המלאה</button>` : ''}
+  </div>` : ''}
+
+  <h2 class="sec">לאן הלך הכסף</h2>
+  <div class="card">${shown.length ? shown.map(([c, v]) => { const b = S.budgets[c], over = b && v > b; return `
     <div class="bar-row" data-bud="${esc(c)}"><div class="emoji">${CATS[c] || '📦'}</div>
       <div><div>${esc(label(c))}${b ? ` <span class="muted">מתוך ${money(b)}</span>` : ''}</div><div class="track"><div class="fill ${over ? 'over' : ''}" style="width:${Math.min(100, Math.max(3, v / (b ? Math.max(b, v) : max) * 100))}%"></div></div></div>
-      <div><b class="${over ? 'neg' : ''}">${money(v)}</b></div></div>`; }).join('') : '<div class="muted">אין הוצאות בחודש הזה</div>'}</div>
-  ${rev.length ? `<h2>סקירה חודשית</h2><div class="card"><div class="muted">קטגוריות שחרגו מהממוצע שלך:</div>
-    ${rev.map(r => `<div class="bar-row" style="grid-template-columns:28px 1fr auto"><div class="emoji">${CATS[r.c] || '📦'}</div><div>${esc(label(r.c))}</div><div><b class="neg">+${money(r.diff)}</b>${r.pct != null && r.pct <= 500 ? ` <span class="muted">(${r.pct}%+)</span>` : ''}</div></div>`).join('')}
-    <div class="muted" style="margin-top:6px">שאל את עצמך: האם זה חד-פעמי או הרגל שנוצר?</div></div>` : ''}
-  ${H ? `<h2>מצב פיננסי</h2><div class="card health">
-    ${H.rate != null ? `<div class="hrow">${dot(rateC)}<div class="grow"><b>שיעור חיסכון: ${Math.round(H.rate * 100)}%</b><div class="muted">${H.rate >= 0.2 ? 'מצוין – 20% ומעלה.' : H.rate >= 0.1 ? 'סביר. היעד המקובל הוא 20%.' : H.rate >= 0 ? 'נמוך. כדאי לחפש דליפות בכלים.' : 'ההוצאות גבוהות מההכנסות בממוצע.'}</div></div></div>` : ''}
-    ${H.runway != null ? `<div class="hrow">${dot(runC)}<div class="grow"><b>כרית ביטחון: ${H.runway.toFixed(1)} חודשי הוצאה</b><div class="muted">${money(H.liquid)} נזילים${H.manual ? ' (עו"ש + חיסכון שהזנת בכלים)' : '. חיסכון וחשבונות אחרים לא נספרים – אפשר להזין אותם בכלים'}. מקובל 3–6 חודשים.</div></div></div>` : ''}
-    ${H.fin > 0 ? `<div class="hrow">${dot(H.negM > H.nMonths / 2 ? 'r' : 'y')}<div class="grow"><b>כיסוי ממשיכות: ${money(H.fin)} ב-${H.nMonths} חודשים</b><div class="muted">זה הכסף שמשכת מחיסכון או מחשבון אחר כדי לסגור חודשים. ב-${H.negM} מתוך ${H.nMonths} חודשים ההוצאות היו גבוהות מההכנסה. זו הסיבה שהיתרה בעו"ש נמוכה.</div></div></div>` : ''}
-    <div class="hrow">${dot(costC)}<div class="grow"><b>ריבית ועמלות ב-12 חודשים: ${money(H.cost)}</b><div class="muted">${H.cost < 300 ? 'נמוך, יופי.' : 'אפשר להוריד: הקטן מסגרת אוברדרפט ובדוק פטור מעמלות.'}</div></div></div>
-  </div>` : ''}
-  <h2>6 חודשים אחרונים</h2>
+      <div><b class="${over ? 'neg' : ''}">${money(v)}</b></div></div>`; }).join('') : '<div class="muted">אין הוצאות בחודש הזה</div>'}
+    ${cats.length > 5 ? `<button class="more" data-allcats="1">${showAllCats ? 'הצג פחות' : `עוד ${cats.length - 5} קטגוריות`}</button>` : ''}
+  </div>
+
+  <h2 class="sec">6 חודשים אחרונים</h2>
   <div class="card"><div class="trend">${last6.map(x => `
     <div class="col ${x === m ? 'sel' : ''}" data-pick="${x}"><div class="pair">
       <div class="b i" style="height:${d.byMonth[x].inc / tmax * 100}%"></div>
       <div class="b e" style="height:${d.byMonth[x].exp / tmax * 100}%"></div></div>
       <div class="m">${mShort(x)}</div></div>`).join('')}</div>
     <div class="legend"><span><i style="background:var(--pos)"></i>הכנסות</span><span><i style="background:var(--neg)"></i>הוצאות</span></div></div>`;
+}
+
+function finSheet() {
+  const d = derived(), m = curMonth(), cur = d.byMonth[m];
+  const rows = o => Object.entries(o).sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `<div class="bar-row" style="grid-template-columns:1fr auto"><div>${esc(k)}</div><div><b>${money(v)}</b></div></div>`).join('');
+  openSheet(`<h3>מאיפה נכנס הכסף ב${mLabel(m)}</h3>
+    ${Object.keys(cur.src).length ? `<div class="muted">הכנסה אמיתית – ${money(cur.inc)}</div>${rows(cur.src)}` : '<div class="muted">לא זוהתה הכנסה החודש.</div>'}
+    ${Object.keys(cur.finSrc).length ? `<div class="muted" style="margin-top:18px">לא הכנסה – כסף שהעברת לעצמך, ${money(cur.fin)}</div>${rows(cur.finSrc)}
+      <div class="note" style="margin-top:12px">משיכה מהפיקדון, מההשקעות או מחשבון אחר שלך היא לא הכנסה חדשה – זה כסף שכבר היה שלך. לכן הוא לא נספר ב"נשאר לך", אבל כן נכנס לחשבון.</div>` : ''}`);
 }
 
 function viewInsights() {
@@ -613,11 +651,12 @@ function viewInsights() {
   const partial = !fullMonths(d).includes(m), noBase = R.others.length < 2;
   const rate = S.settings.rate;
   const diffTxt = (v, a) => a == null ? '' : `${v >= a ? '+' : '-'}${money(Math.abs(v - a)).replace('-', '')}`;
-  return `<div class="months">
-    <button data-m="-1" ${idx <= 0 ? 'disabled' : ''} aria-label="חודש קודם">›</button><div class="title">${mLabel(m)}${perRange(m) ? `<div class="muted" style="font-size:12px;font-weight:400">${perRange(m)}</div>` : ''}</div>
-    <button data-m="1" ${idx >= d.months.length - 1 ? 'disabled' : ''} aria-label="חודש הבא">‹</button></div>
+  return `${monthNav(d, m)}
   ${partial ? `<div class="note">זה חודש חלקי${idx === d.months.length - 1 ? ' (הנתונים עד ' + lastDay(m) + ')' : ''}, אז ההשוואה לממוצע פחות מדויקת.</div>` : ''}
   ${noBase ? '<div class="note">אין עדיין מספיק חודשים מלאים כדי לחשב ממוצע. ייבא נתונים של לפחות 3 חודשים.</div>' : ''}
+
+  <h2 class="sec">מצב פיננסי</h2>
+  ${healthCard(d)}
 
   <h2>1. הכנסות, הוצאות ויתרה פנויה מול הממוצע</h2>
   <div class="card story">
@@ -683,9 +722,7 @@ function viewTxns() {
     html += txRow(t);
   }
   if (day) html += '</div>';
-  return `<div class="months">
-    <button data-m="-1" ${idx <= 0 ? 'disabled' : ''} aria-label="חודש קודם">›</button><div class="title">${mLabel(m)}${perRange(m) ? `<div class="muted" style="font-size:12px;font-weight:400">${perRange(m)}</div>` : ''}</div>
-    <button data-m="1" ${idx >= d.months.length - 1 ? 'disabled' : ''} aria-label="חודש הבא">‹</button></div>
+  return `${monthNav(d, m)}
   <input class="search" id="q" type="search" placeholder="חיפוש בית עסק..." value="${esc(filter.q)}">
   <div class="chips">${[['all', 'הכל'], ['exp', 'הוצאות'], ['inc', 'הכנסות'], ['other', 'ללא קטגוריה']].map(([k, l]) => `<button class="chip ${filter.kind === k ? 'on' : ''}" data-kind="${k}">${l}</button>`).join('')}</div>
   ${html || '<div class="empty">אין תנועות</div>'}`;
@@ -932,7 +969,7 @@ function addTx() {
 
 /* ---------- events ---------- */
 document.addEventListener('click', async e => {
-  const el = e.target.closest('[data-tab],[data-go],[data-m],[data-pick],[data-kind],[data-id],[data-bud],[data-other],#pick,#fab,.sheet-bg');
+  const el = e.target.closest('[data-tab],[data-go],[data-m],[data-pick],[data-kind],[data-id],[data-bud],[data-other],[data-fin],[data-allcats],#pick,#fab,.sheet-bg');
   if (!el) return;
   if (el.dataset.tab) { tab = el.dataset.tab; render(); scrollTo(0, 0); }
   else if (el.dataset.go) { tab = el.dataset.go; render(); scrollTo(0, 0); }
@@ -942,6 +979,8 @@ document.addEventListener('click', async e => {
   else if (el.dataset.id) editTx(el.dataset.id);
   else if (el.dataset.bud) setBudget(el.dataset.bud);
   else if (el.dataset.other) { filter.kind = 'other'; tab = 'txns'; render(); scrollTo(0, 0); }
+  else if (el.dataset.fin) finSheet();
+  else if (el.dataset.allcats) { showAllCats = !showAllCats; render(); }
   else if (el.id === 'pick') { const f = $('#file'); f.onchange = async () => {
       const files = [...f.files]; if (!files.length) return;
       $('#importResult').innerHTML = '<div class="note">קורא קבצים…</div>';
