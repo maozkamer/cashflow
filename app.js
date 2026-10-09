@@ -2,7 +2,7 @@
 /* תזרים מזומנים - כל הנתונים נשמרים רק במכשיר (localStorage). */
 
 const KEY = 'cashflow.v1';
-const VERSION = '2026-10-09-c';
+const VERSION = '2026-10-09-e';
 const MONTHS = ['ינואר','פברואר','מרץ','אפריל','מאי','יוני','יולי','אוגוסט','ספטמבר','אוקטובר','נובמבר','דצמבר'];
 const CARD_CAT = 'כרטיס אשראי';          // חיוב אשראי בעו"ש
 const INTERNAL = 'פנימי';
@@ -32,7 +32,7 @@ const CARD_MAP = {
 
 const DONATE = /עמותת|עמותה|תרומה|תרומות|ע"ר\)|תמיכה וסיוע/;
 
-const INVEST = /ביטס אוף גולד|בלינק|blink|אינטראקטיב|interactive|אקסלנס|מיטב|איביאי|\bIBI\b|אלטשולר|פסגות/i;
+const INVEST = /ביטס אוף|בלינק|blink|אינטראקטיב|interactive|אקסלנס|מיטב|איביאי|\bIBI\b|אלטשולר|פסגות/i;
 
 // כללים לתנועות בנק (לפי סדר)
 const BANK_RULES = [
@@ -252,21 +252,71 @@ function applyRule(t) {
   return r || t.cat;
 }
 
+/* Discount's CSV export is UTF-16, tab separated, with "6,180.00" style amounts.
+   Handing that to SheetJS made it guess dates in US order, so 09/10 (9 Oct)
+   came back as 10 September and the amounts came back as strings. Parse text
+   files ourselves instead, and keep SheetJS for real .xlsx workbooks. */
+function splitRow(line, sep) {
+  const out = []; let cur = '', q = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (q) { if (ch === '"') { if (line[i + 1] === '"') { cur += '"'; i++; } else q = false; } else cur += ch; }
+    else if (ch === '"') q = true;
+    else if (ch === sep) { out.push(cur); cur = ''; }
+    else cur += ch;
+  }
+  out.push(cur);
+  return out.map(x => { const t = x.trim(); return t === '' ? null : t; });
+}
+
+function textSheet(buf) {
+  const b = new Uint8Array(buf);
+  if (b.length < 2 || (b[0] === 0x50 && b[1] === 0x4b)) return null;   // PK.. = xlsx
+  let txt;
+  try {
+    if (b[0] === 0xff && b[1] === 0xfe) txt = new TextDecoder('utf-16le').decode(b);
+    else if (b[0] === 0xfe && b[1] === 0xff) txt = new TextDecoder('utf-16be').decode(b);
+    else {
+      txt = new TextDecoder('utf-8').decode(b);
+      if (txt.includes('�')) txt = new TextDecoder('windows-1255').decode(b);
+    }
+  } catch (e) { return null; }
+  if (!txt || txt.includes('\u0000')) return null;
+  const lines = txt.replace(/^﻿/, '').split(/\r?\n/).filter(l => l.trim() !== '');
+  if (!lines.length) return null;
+  const h = lines[0], n = ch => h.split(ch).length - 1;
+  const sep = n('\t') ? '\t' : n(';') > n(',') ? ';' : ',';
+  if (!n(sep)) return null;
+  return lines.map(l => splitRow(l, sep));
+}
+
+/* a cell's number whether it arrived as 6180, "6,180.00" or "₪6,180" */
+const cellNum = v => {
+  if (typeof v === 'number') return v;
+  const t = String(v ?? '').replace(/[,₪\s]/g, '');
+  return t !== '' && /^-?\d+(\.\d+)?$/.test(t) ? parseFloat(t) : null;
+};
+
 function parseWorkbook(buf) {
-  const wb = XLSX.read(buf, { type: 'array' });
   const out = { txns: [], kinds: new Set() };
-  for (const name of wb.SheetNames) {
-    const top = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, raw: true, defval: null }).slice(0, 8);
-    for (const r of top) {
-      const c = String(r[0] ?? '');
-      if (c.includes('חשבון') && c.includes('|') && !wb.Sheets[name]['!card']) {
-        const tokens = c.split('|').pop().trim().split(/\s+/).filter(w => w.length > 1 && !/^\d+$/.test(w));
-        if (tokens.length >= 2) { S.settings.holder = tokens; out.holder = true; }
-      }
+  const tr = textSheet(buf);
+  let sheets;
+  if (tr) sheets = [{ rows: tr, card: false }];
+  else {
+    const wb = XLSX.read(buf, { type: 'array' });
+    sheets = wb.SheetNames.map(n => ({
+      rows: XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: true, defval: null }),
+      card: !!wb.Sheets[n]['!card'] }));
+  }
+  for (const sh of sheets) for (const r of sh.rows.slice(0, 8)) {
+    const c = String(r[0] ?? '');
+    if (c.includes('חשבון') && c.includes('|') && !sh.card) {
+      const tokens = c.split('|').pop().trim().split(/\s+/).filter(w => w.length > 1 && !/^\d+$/.test(w));
+      if (tokens.length >= 2) { S.settings.holder = tokens; out.holder = true; }
     }
   }
-  for (const name of wb.SheetNames) {
-    const rows = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, raw: true, defval: null });
+  for (const sh of sheets) {
+    const rows = sh.rows;
     const hi = rows.findIndex(r => r.some(c => String(c ?? '').trim() === 'תאריך עסקה') || r.some(c => String(c ?? '').includes('תיאור התנועה')) || r.some(c => String(c ?? '').trim() === 'חודש חיוב'));
     if (hi < 0) continue;
     const head = rows[hi].map(c => String(c ?? '').trim());
@@ -276,13 +326,14 @@ function parseWorkbook(buf) {
       const c = { date: col('תאריך עסקה'), name: col('שם בית העסק'), cat: col('קטגוריה'), card: col('4 ספרות'), type: col('סוג עסקה'), amt: col('סכום חיוב'), cdate: col('תאריך חיוב') };
       const seen = {};
       for (const r of rows.slice(hi + 1)) {
-        let date = parseDate(r[c.date]); if (!date || typeof r[c.amt] !== 'number') continue;
+        let date = parseDate(r[c.date]); const a = cellNum(r[c.amt]);
+        if (!date || a == null) continue;
         const cd = parseDate(r[c.cdate]);
         const imm = String(r[c.type] ?? '').includes('מיידי') || undefined;
         if (String(r[c.type] ?? '').includes('תשלומים')) date = cd || date;
         const desc = clean(r[c.name]);
         const card = String(r[c.card] ?? '').trim();
-        const amount = -r[c.amt];
+        const amount = -a;
         const base = ['card', date, amount, desc, card].join('|');
         const n = seen[base] = (seen[base] || 0) + 1;
         const cat = INVEST.test(desc) ? SAV : DONATE.test(desc) ? 'תרומות' : CARD_MAP[String(r[c.cat] ?? '').trim()] || 'אחר';
@@ -290,15 +341,17 @@ function parseWorkbook(buf) {
       }
     } else if (head.some(h => h.includes('תיאור התנועה'))) {
       out.kinds.add('bank');
-      const c = { date: col('תאריך'), desc: col('תיאור התנועה'), amt: col('זכות/חובה'), bal: col('יתרה') };
+      const c = { date: col('תאריך'), desc: col('תיאור התנועה'), amt: col('זכות/חובה'), bal: col('יתרה'), ref: col('אסמכתה') };
       const seen = {};
       for (const r of rows.slice(hi + 1)) {
-        const date = parseDate(r[c.date]); if (!date || typeof r[c.amt] !== 'number') continue;
-        const desc = clean(r[c.desc]); const amount = r[c.amt];
-        const bal = typeof r[c.bal] === 'number' ? r[c.bal] : null;
+        const date = parseDate(r[c.date]); const amount = cellNum(r[c.amt]);
+        if (!date || amount == null) continue;
+        const desc = clean(r[c.desc]);
+        const bal = cellNum(r[c.bal]);
+        const ref = String(r[c.ref] ?? '').replace(/\s+/g, '').split('/')[0] || null;
         const base = ['bank', date, amount, desc, bal].join('|');
         const n = seen[base] = (seen[base] || 0) + 1;
-        out.txns.push({ id: hash(base) + '#' + n, date, desc, amount, src: 'bank', bal, cat: classifyBank(desc, amount) });
+        out.txns.push({ id: hash(base) + '#' + n, date, desc, amount, src: 'bank', bal, ref, cat: classifyBank(desc, amount) });
       }
     } else if (head.includes('חודש חיוב')) {
       out.kinds.add('summary');
@@ -337,16 +390,57 @@ function headline() {
     <button class="btn block" data-go="insights">לסקירה המלאה</button></div>`;
 }
 
+/* The same transaction is not identical in the two Discount exports: the xlsx
+   truncates the description, the csv does not, the running balance can differ by
+   a charge that was still pending, and a pending row is re-dated once it settles.
+   Hashing the whole row therefore imported it twice. Match on the bank's own
+   reference number first, then fall back to amount + description + a few days. */
+const descKey = d => String(d).replace(/\s+/g, ' ').trim().slice(0, 14);
+const dayGap = (a, b) => Math.abs(Date.parse(a) - Date.parse(b)) / 864e5;
+
+function addToIndex(idx, t) {
+  idx.id.set(t.id, t);
+  if (t.ref) idx.ref.set(t.src + '|' + t.ref, t);
+  if (t.src === 'bank') {
+    const k = t.amount + '|' + descKey(t.desc);
+    (idx.loose.get(k) || idx.loose.set(k, []).get(k)).push(t);
+  }
+}
+function buildIndex(txns) {
+  const idx = { id: new Map(), ref: new Map(), loose: new Map() };
+  for (const t of txns) addToIndex(idx, t);
+  return idx;
+}
+function findSame(t, idx, used) {
+  const byId = idx.id.get(t.id); if (byId) return byId;
+  if (t.ref) { const r = idx.ref.get(t.src + '|' + t.ref); if (r) return r; }
+  if (t.src !== 'bank') return null;
+  const list = idx.loose.get(t.amount + '|' + descKey(t.desc));
+  if (list) for (const e of list) if (!used.has(e) && dayGap(e.date, t.date) <= 7) return e;
+  return null;
+}
+
 async function importFiles(files) {
   const results = [];
   for (const f of files) {
     try {
       const p = parseWorkbook(await f.arrayBuffer());
-      const have = new Map(S.txns.map(t => [t.id, t]));
+      const idx = buildIndex(S.txns), used = new Set();
       let added = 0, dup = 0;
       for (const t of p.txns) {
-        if (have.has(t.id)) { dup++; const e = have.get(t.id); if (t.cd && !e.cd) { e.cd = t.cd; e.imm = t.imm; } continue; }
-        t.cat = applyRule(t); S.txns.push(t); have.set(t.id, t); added++;
+        const e = findSame(t, idx, used);
+        if (e) {
+          dup++; used.add(e);
+          if (t.cd && !e.cd) { e.cd = t.cd; e.imm = t.imm; }
+          if (t.ref && !e.ref) e.ref = t.ref;
+          if (t.src === 'bank') {            // the later export is the settled truth
+            if (t.desc.length > e.desc.length) e.desc = t.desc;
+            e.date = t.date;
+            if (t.bal != null) e.bal = t.bal;
+          }
+          continue;
+        }
+        t.cat = applyRule(t); S.txns.push(t); addToIndex(idx, t); used.add(t); added++;
       }
       let kind = p.kinds.has('bank') ? 'חשבון עו"ש' : p.kinds.has('card') ? 'כרטיס אשראי' : p.kinds.has('summary') ? 'סיכום חיובי אשראי' : null;
       results.push({ name: f.name, kind, added, dup, summary: p.kinds.has('summary') && !p.txns.length });
